@@ -1,0 +1,8 @@
+.zig-cache/
+zig-out/
+*.qbe
+*.s
+*.sec
+/vendor/qbe/qbe
+/vendor/qbe/*.o
+.ccls-cache/

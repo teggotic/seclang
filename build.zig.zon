@@ -1,0 +1,17 @@
+.{
+    .name = "zigimpl",
+    .version = "0.0.0",
+
+    .dependencies = .{
+        .pretty = .{
+            .url = "https://github.com/timfayz/pretty/archive/refs/heads/main.tar.gz",
+            .hash = "12209290db27d058b481801cf9a79c706fb0c482e7f6378d50495750aae19524d4b7",
+        },
+    },
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
