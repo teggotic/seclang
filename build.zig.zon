@@ -4,8 +4,8 @@
 
     .dependencies = .{
         .pretty = .{
-            .url = "https://github.com/timfayz/pretty/archive/refs/heads/main.tar.gz",
-            .hash = "12209290db27d058b481801cf9a79c706fb0c482e7f6378d50495750aae19524d4b7",
+            .url = "https://github.com/teggotic/zig-pretty/archive/refs/heads/main.tar.gz",
+            .hash = "1220f6b446ffcdf5858743130ddd5889c13e5894ec81f0a20a306711b83fd88bb5a5",
         },
     },
 

@@ -25,7 +25,7 @@ pub const CompiledInstructions = struct {
     }
 };
 
-pub fn compile(fdin: std.posix.fd_t) !CompiledInstructions {
+pub fn compile(fdin: std.posix.fd_t, entrypoint: []const u8) !CompiledInstructions {
     try std.posix.lseek_SET(fdin, 0);
 
     const fdout = try std.posix.memfd_create("qbe_out", 0);
@@ -36,9 +36,8 @@ pub fn compile(fdin: std.posix.fd_t) !CompiledInstructions {
     const fout = fdopen(fdout, "w");
 
     {
-        const jmp = "jmp _start\n";
-        const x = std.c.fwrite(jmp.ptr, 1, jmp.len, fout.?);
-        std.debug.assert(x == jmp.len);
+        const writer = (std.fs.File {.handle = fdout}).writer();
+        try std.fmt.format(writer, "jmp {s}\n", .{entrypoint});
     }
 
     defer _ = std.c.fclose(fout.?);

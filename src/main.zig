@@ -57,29 +57,43 @@ pub fn main() !void {
     var llJitContext = llexp.LLType.TypesContext.JitContext.init(&llTypesContext);
     defer llJitContext.deinit();
 
+    var c: usize = 0;
+
+    var compileArena = std.heap.ArenaAllocator.init(allocator);
     while (try sexpIter.next()) |root| {
-        defer {
-            const res = arena_state.reset(.retain_capacity);
-            std.debug.assert(res);
-        }
+        defer _ = compileArena.reset(.retain_capacity);
+        // defer {
+        //     const res = arena_state.reset(.retain_capacity);
+        //     std.debug.assert(res);
+        // }
         // defer ctx.freeNode(root) catch unreachable;
         // ctx.print(root);
         // std.debug.print("\n", .{});
         var ast = try llastParser.parse(root);
-        ast.print(0, &ctx);
+        // ast.print(0, &ctx);
         const typeCheckedAst = try llTypeChecker.typeCheck(&ast);
         // pretty.print(std.heap.page_allocator, typeCheckedAst, .{}) catch unreachable;
-        const compiledFunction = llJitContext.compile(typeCheckedAst) catch unreachable;
-        defer compiledFunction.deinit();
-        const func: *const (fn (u32, u32) callconv(.C) u32) = @ptrCast(compiledFunction.code);
-        const xxx = func(20, 49);
-        std.debug.print("func(...) = {}\n", .{xxx});
+
+        const compiledFunction = llJitContext.compile(typeCheckedAst, arena_state.allocator()) catch unreachable;
+        llJitContext.functions.put(compiledFunction.name, .{ .compiled = compiledFunction }) catch unreachable;
+        // const func: *const (fn (u32, u32) callconv(.C) u32) = @ptrCast(compiledFunction.code);
+        // const xxx = func(20, 47);
+        // std.debug.print("func(...) = {}\n", .{xxx});
+        // _ = xxx;
+        c += 1;
 
         // defer ast.free(allocator);
         // try ctx.freeNode(root);
         // print(&ctx, root);
         // std.debug.print("\n", .{});
     }
+
+    if (llJitContext.functions.get("main")) |mainF| {
+        const func: *const (fn () callconv(.C) void) = @ptrCast(mainF.compiled.code);
+        func();
+    }
+
+    std.debug.print("c = {}\n", .{c});
 
     std.debug.print("ctx.impl.strings.len = {}\n", .{ctx.impl.strings.items.len});
     std.debug.print("ctx.impl.strings.len = {}\n", .{ctx.impl.strings_raw.items.len});

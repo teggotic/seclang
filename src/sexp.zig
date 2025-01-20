@@ -115,8 +115,11 @@ pub const Sexp = struct {
             return self.impl.lists_raw.items[slice.start..slice.start + slice.size];
         }
 
-        pub fn print(self: *@This(), idx: Index.Node) void {
+        pub fn print(self: *@This(), idx: Index.Node, indent: usize) void {
+            const indent_raw = " " ** 30;
+            const indent_str = indent_raw[0..indent];
             const node = self.getNode(idx);
+            std.debug.print("{s}", .{indent_str});
             switch (node.tag) {
                 .list => {
                     const list_idx = node.data.list;
@@ -126,7 +129,7 @@ pub const Sexp = struct {
                         if (i > 0) {
                             std.debug.print(" ", .{});
                         }
-                        self.print(item);
+                        self.print(item, 0);
                     }
                     std.debug.print(")", .{});
                 },
@@ -347,6 +350,19 @@ pub const Sexp = struct {
                     if (self.source.len == 0) {
                         return;
                     }
+                    if (self.source[0] == ';') {
+                        const i = blk: for (0..self.source.len) |i| {
+                            if (self.source[i] == '\n') {
+                                break :blk i;
+                            }
+                        } else {
+                            unreachable;
+                        };
+                        self.skip_bytes(i);
+                    }
+                    if (self.source.len == 0) {
+                        return;
+                    }
                     var i: usize = 0;
                     while (i < self.source.len) {
                         switch (self.source[i]) {
@@ -405,11 +421,11 @@ pub const Sexp = struct {
                             self.skip_bytes(end);
                             return .{ .int_value = std.fmt.parseInt(u32, str, 10) catch unreachable };
                         },
-                        'a'...'z', 'A'...'Z', '_', '-', '+', '*', '`' => {
+                        'a'...'z', 'A'...'Z', '_', '-', '+', '*', '`', '/' => {
                             var i: usize = 0;
                             const end = blk: while (i < self.source.len) : (i += 1) {
                                 switch (self.source[i]) {
-                                    'a'...'z', 'A'...'Z', '0'...'9', '_', '-', '+', '*', '`' => {},
+                                    'a'...'z', 'A'...'Z', '0'...'9', '_', '-', '+', '*', '`', '/' => {},
                                     else => break :blk i,
                                 }
                             } else {
@@ -439,6 +455,7 @@ pub const Sexp = struct {
                             return .{ .str = void{} };
                         },
                         else => {
+                            std.debug.print("Invalid token: {}\n", .{self.source[0]});
                             return error.InvalidToken;
                         },
                     }

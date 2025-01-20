@@ -117,6 +117,10 @@ pub const LLType = union(enum) {
         };
     };
 
+    number_literal: struct {
+        negative: bool,
+        float: bool,
+    },
     integer: struct {
         signed: bool,
         bits: u16,
@@ -125,7 +129,12 @@ pub const LLType = union(enum) {
     pointer: *LLType,
     struct_: StructType,
     function: FunctionType,
+    macro: FunctionType,
     void: void,
+
+    pub inline fn isVoid(self: *const LLType) bool {
+        return self.* == .void;
+    }
 
     pub const FunctionType = struct {
         name: []const u8,
@@ -158,13 +167,40 @@ pub const LLType = union(enum) {
         }
     }
 
-    pub fn equals(self: *const LLType, other: *const LLType) bool {
+    pub fn acceptsType(self: *const LLType, other: *const LLType) bool {
         switch (self.*) {
             .integer => |int| {
                 switch (other.*) {
                     .integer => |other_int| return int.signed == other_int.signed and int.bits == other_int.bits,
+                    .number_literal => |other_int| {
+                        if (other_int.float) { return false; }
+                        if (other_int.negative) {
+                            return int.signed;
+                        }
+                        // TODO: check for overflow
+                        return true;
+                    },
                     else => {
                         return false;
+                    },
+                }
+            },
+            .number_literal => |num| {
+                switch (other.*) {
+                    .number_literal => |other_num| {
+                        if (num.float != other_num.float) {
+                            return false;
+                        }
+                        if (num.negative != other_num.negative) {
+                            return false;
+                        }
+                        return true;
+                    },
+                    .integer => {
+                        return other.acceptsType(self);
+                    },
+                    else => {
+                        unreachable;
                     },
                 }
             },
@@ -198,6 +234,7 @@ pub const LLType = union(enum) {
             types.put("f64", .{ .floating = 64 }) catch unreachable;
 
             types.put("void", .{ .void = void{} }) catch unreachable;
+            types.put("sexp", .{ .pointer = types.getPtr("void") orelse unreachable }) catch unreachable;
 
             return @This(){
                 .sexpCtx = sexpCtx,
@@ -222,6 +259,10 @@ pub const LLType = union(enum) {
             return idx;
         }
 
+        pub fn pushType(self: *@This(), name: []const u8, ty: LLType) !void {
+            self.types.put(name, ty) catch unreachable;
+        }
+
         pub const JitContext = struct {
             var globalThis: ?*@This() = null;
 
@@ -234,9 +275,17 @@ pub const LLType = union(enum) {
                     std.posix.munmap(self.code);
                 }
             };
+            pub const BuiltinFunction = struct {
+                name: []const u8,
+                ptr: *void,
+            };
+            pub const Func = union(enum) {
+                builtin: BuiltinFunction,
+                compiled: CompiledFunction,
+            };
 
             ctx: *TypesContext,
-            functions: std.StringHashMap(CompiledFunction),
+            functions: std.StringHashMap(Func),
             ks: *keystone.ks_engine,
 
             pub fn init(ctx: *TypesContext) *@This() {
@@ -272,7 +321,7 @@ pub const LLType = union(enum) {
 
                 ptr.* = .{
                     .ctx = ctx,
-                    .functions = std.StringHashMap(CompiledFunction).init(ctx.allocator),
+                    .functions = std.StringHashMap(Func).init(ctx.allocator),
                     .ks = ks,
                 };
                 globalThis = ptr;
@@ -292,8 +341,19 @@ pub const LLType = union(enum) {
 
             fn resolveSymbol(self: *@This(), symbol: []const u8, value: [*c]u64) bool {
                 std.debug.print("resolveSymbol: got symbol = {s}\n", .{symbol});
-                _ = self;
-                _ = value;
+                if (self.functions.get(symbol)) |f| {
+                    switch (f) {
+                        .builtin => |builtin| {
+                            value.* = @intFromPtr(builtin.ptr);
+                            return true;
+                        },
+                        .compiled => |compiled| {
+                            value.* = @intFromPtr(compiled.code.ptr);
+                            return true;
+                        },
+                    }
+                    return true;
+                }
                 return false;
             }
 
@@ -303,21 +363,26 @@ pub const LLType = union(enum) {
                 return globalThis.?.resolveSymbol(s, value);
             }
 
-            pub fn compile(self: *@This(), func: TypedAst) !CompiledFunction {
-                var compiler = Compiler.init(self);
+            pub fn compile(self: *@This(), func: TypedAst, allocator: Allocator) !CompiledFunction {
+                var compiler = Compiler.init(self, allocator);
                 defer compiler.deinit();
 
                 return compiler.compile(func);
             }
 
             pub const Compiler = struct {
+                const Scope = std.StringHashMapUnmanaged(ValueRef);
                 jitCtx: *JitContext,
                 qbeState: struct {
                     fdin: std.posix.fd_t,
                     writer: std.fs.File.Writer,
                 },
+                scopes: std.ArrayListUnmanaged(Scope) = .{},
+                globals_to_process: std.StringHashMapUnmanaged(struct { name: ValueRef, typ: LLType, ref: ValueRef }) = .{},
+                vari: usize = 0,
+                allocator: Allocator,
 
-                pub fn init(jitCtx: *JitContext) Compiler {
+                pub fn init(jitCtx: *JitContext, allocator: Allocator) Compiler {
                     const fd = std.posix.memfd_create("qbe_in", 0) catch unreachable;
                     return .{
                         .jitCtx = jitCtx,
@@ -325,21 +390,62 @@ pub const LLType = union(enum) {
                             .fdin = fd,
                             .writer = (std.fs.File {.handle = fd}).writer(),
                         },
+                        .allocator = allocator,
                     };
                 }
 
                 pub fn deinit(self: *@This()) void {
-                    _ = self;
-                    // std.posix.close(self.qbeState.fdin);
+                    std.debug.assert(self.scopes.items.len == 0);
+                    self.scopes.deinit(self.allocator);
+                    self.globals_to_process.deinit(self.allocator);
+                }
+
+                pub fn newScope(self: *@This()) void {
+                    self.scopes.append(self.allocator, .{}) catch unreachable;
+                }
+
+                pub fn closeScope(self: *@This()) void {
+                    std.debug.assert(self.scopes.items.len > 0);
+                    var scope = self.scopes.pop();
+                    scope.deinit(self.allocator);
+                }
+
+                pub fn pushIntoScope(self: *@This(), name: []const u8, typ: ValueRef) void {
+                    std.debug.assert(self.scopes.items.len > 0);
+                    var scope = &self.scopes.items[self.scopes.items.len - 1];
+                    std.debug.assert(!scope.contains(name));
+                    scope.put(self.allocator, name, typ) catch unreachable;
+                }
+
+                pub fn lookup(self: *@This(), name: []const u8) ?ValueRef {
+                    std.debug.assert(self.scopes.items.len > 0);
+                    for (0..self.scopes.items.len) |i| {
+                        const idx = self.scopes.items.len - 1 - i;
+                        const scope = self.scopes.items[idx];
+                        if (scope.contains(name)) {
+                            return scope.get(name);
+                        }
+                    }
+                    if (self.jitCtx.functions.get(name)) |_| {
+                        self.globals_to_process.put(self.allocator, name, .{
+                            .name = .{ .external_global = name },
+                            .typ = self.jitCtx.ctx.types.get(name) orelse unreachable,
+                            .ref = .{ .global = name },
+                        }) catch unreachable;
+                        return .{
+                            .external_global = name
+                        };
+                    }
+                    return null;
                 }
 
                 fn format(self: *@This(), comptime fmt: []const u8, args: anytype) void {
                     std.fmt.format(self.qbeState.writer, fmt, args) catch unreachable;
                 }
 
-                fn t2s(self: *@This(), typ: *const LLType) []const u8 {
+                fn t2s(self: *@This(), typ: LLType) ![]const u8 {
                     _ = self;
-                    switch (typ.*) {
+                    switch (typ) {
                         .integer => |int| {
                             switch (int.bits) {
                                 32 => {
@@ -356,6 +462,15 @@ pub const LLType = union(enum) {
                         .pointer => {
                             return "l";
                         },
+                        .number_literal => {
+                            return error.NumberLiteralIsNotSupported;
+                        },
+                        .void => {
+                            return "l";
+                        },
+                        .function => {
+                            return "l";
+                        },
                         else => {
                             dump_and_fail(.{typ});
                         },
@@ -363,16 +478,138 @@ pub const LLType = union(enum) {
                 }
 
                 fn emitQBE(self: *@This(), defun: TypedAst.Ast.Defun, fn_type: LLType.FunctionType) !void {
-                    self.format("function {s} $_start(", .{self.t2s(fn_type.return_type)});
-                    for (fn_type.params) |param| {
-                        self.format("{s} %{s},", .{self.t2s(param.typ), param.name});
+                    self.newScope();
+                    self.format("function {s} ${s}(", .{try self.t2s(fn_type.return_type.*), defun.name});
+                    for (fn_type.params, 0..) |param, i| {
+                        if (i > 0) {
+                            self.format(", ", .{});
+                        }
+                        self.format("{s} %arg_{s}", .{try self.t2s(param.typ.*), param.name});
+                        self.pushIntoScope(param.name, .{ .arg = param.name });
                     }
                     self.format(") {{\n", .{});
                     self.format("@start\n", .{});
-                    self.format("    %_v0 ={s} add %a, %b\n", .{self.t2s(fn_type.return_type)});
-                    self.format("    ret %_v0\n", .{});
+                    var ret: ?ValueRef = null;
+                    for (defun.body) |statement| {
+                        ret = try self.emitExpr(statement);
+                    }
+                    if (!fn_type.return_type.isVoid()) {
+                        self.format("    ret {any}\n", .{ ret.? });
+                    } else {
+                        self.format("    ret 0\n", .{});
+                    }
                     self.format("}}\n", .{});
-                    _ = defun;
+                    self.closeScope();
+                    std.debug.assert(self.scopes.items.len == 0);
+                }
+
+                const ValueRef = union(enum) {
+                    none,
+                    local: usize,
+                    arg: []const u8,
+                    global: []const u8,
+                    external_global: []const u8,
+                    integer: isize,
+
+                    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+                        _ = options;
+                        _ = fmt;
+                        // std.debug.print("{s}\n", .{fmt});
+                        switch (self) {
+                            .none => { unreachable; },
+                            .local => |local| {
+                                try std.fmt.format(writer, "%v_{}", .{local});
+                            },
+                            .arg => |arg| {
+                                try std.fmt.format(writer, "%arg_{s}", .{arg});
+                            },
+                            .global => |global| {
+                                try std.fmt.format(writer, "${s}", .{global});
+                            },
+                            .external_global => |global| {
+                                try std.fmt.format(writer, "$ref_{s}", .{global});
+                            },
+                            .integer => |int| {
+                                try std.fmt.format(writer, "{}", .{int});
+                            },
+                        }
+                    }
+                };
+
+                fn emitExpr(self: *@This(), expr: TypedAst) !ValueRef {
+                    switch (expr.ast) {
+                        .symbol => |symbol| {
+                            return self.lookup(symbol.name) orelse unreachable;
+                        },
+                        .int_value => |int_value| {
+                            return .{ .integer = @intCast(int_value) };
+                        },
+                        .call => |call| {
+                            const Builtin = enum {
+                                @"+",
+                            };
+                            const builtin = std.meta.stringToEnum(Builtin, call.name) orelse {
+                                const fnType = self.jitCtx.ctx.types.get(call.name) orelse {
+                                    dump_and_fail(.{.call = call});
+                                };
+                                std.debug.assert(fnType == .function);
+                                const nameRef = self.lookup(call.name) orelse {
+                                    dump_and_fail(.{.call = call});
+                                };
+                                const fnRef = self.qbeAssignTemporary(fnType) catch unreachable;
+                                self.format("loadl {any}\n", .{nameRef});
+                                var args = std.ArrayList(ValueRef).init(self.allocator);
+                                defer args.deinit();
+                                for (call.args) |arg| {
+                                    try args.append(try self.emitExpr(arg));
+                                }
+                                const resRef = self.qbeAssignTemporary(expr.typ) catch unreachable;
+                                self.format("call {any}(", .{fnRef});
+                                for (args.items, fnType.function.params, 0..) |arg, param, i| {
+                                    if (i == 0) {
+                                        self.format("{s} {any}", .{ try self.t2s(param.typ.*), arg });
+                                    } else {
+                                        self.format(", {s} {any}", .{ try self.t2s(param.typ.*), arg });
+                                    }
+                                }
+                                self.format(")\n", .{});
+                                return resRef;
+                            };
+                            switch (builtin) {
+                                .@"+" => {
+                                    const arg1Ref = try self.emitExpr(call.args[0]);
+                                    const arg2Ref = try self.emitExpr(call.args[1]);
+                                    var resRef = self.qbeAssignTemporary(expr.typ) catch unreachable;
+                                    self.format("add {any}, {any}\n", .{ arg1Ref, arg2Ref });
+                                    for (call.args[2..]) |arg| {
+                                        const curRef = resRef;
+                                        const argRef = try self.emitExpr(arg);
+                                        resRef = self.qbeAssignTemporary(expr.typ) catch unreachable;
+                                        self.format("add {any}, {any}\n", .{ argRef, curRef });
+                                    }
+                                    return resRef;
+                                },
+                            }
+                        },
+                        else => {
+                            unreachable;
+                        }
+                    }
+                }
+
+                fn qbeAssign(self: *@This(), place: ValueRef, typ: LLType) !void {
+                    self.format("{any} ={s} ", .{ place, try self.t2s(typ) });
+                }
+
+                fn getTemporary(self: *@This()) ValueRef {
+                    defer self.vari += 1;
+                    return .{ .local = self.vari };
+                }
+
+                fn qbeAssignTemporary(self: *@This(), typ: LLType) !ValueRef {
+                    const place = self.getTemporary();
+                    try self.qbeAssign(place, typ);
+                    return place;
                 }
 
                 extern "c" fn fdopen(fd: c_int, mode: [*:0]const u8) ?*std.c.FILE;
@@ -386,6 +623,13 @@ pub const LLType = union(enum) {
                     }
 
                     try self.emitQBE(defun, funcType);
+                    var glbIt = self.globals_to_process.iterator();
+                    while (glbIt.next()) |glbEntry| {
+                        const glb = glbEntry.value_ptr.*;
+                        std.debug.assert(glb.name == .external_global);
+                        std.debug.assert(glb.ref == .global);
+                        self.format("data {any} = {{ {s} {any} }}\n", .{glb.name, try self.t2s(glb.typ), glb.ref});
+                    }
 
                     {
                         const out_size = try std.posix.lseek_CUR_get(self.qbeState.fdin);
@@ -397,7 +641,8 @@ pub const LLType = union(enum) {
 
                     // unreachable;
 
-                    const instructions = try self.qbeCompile();
+                    const instructions = try self.qbeCompile(defun.name);
+                    std.debug.print("{s}\n", .{instructions.mmap});
                     defer instructions.deinit();
                     const fn_mem = try self.jitCode(instructions.code);
                     return .{
@@ -407,8 +652,8 @@ pub const LLType = union(enum) {
                     };
                 }
 
-                fn qbeCompile(self: *@This()) !qbe.CompiledInstructions {
-                    return qbe.compile(self.qbeState.fdin);
+                fn qbeCompile(self: *@This(), entrypoint: []const u8) !qbe.CompiledInstructions {
+                    return qbe.compile(self.qbeState.fdin, entrypoint);
                 }
 
                 fn jitCode(self: *@This(), code: [*c]const u8) ![]const align(std.mem.page_size)u8 {
@@ -419,7 +664,7 @@ pub const LLType = union(enum) {
                     if (keystone.ks_asm(self.jitCtx.ks, code, 0, &encode, &sz, &count) != keystone.KS_ERR_OK) {
                         std.debug.panic("ERROR: ks_asm() failed & count = {}, error = {*}\n", .{count, keystone.ks_strerror(keystone.ks_errno(self.jitCtx.ks))});
                     } else {
-                        std.debug.print("Compiled: {} bytes, statements: {}\n", .{sz, count});
+                        // std.debug.print("Compiled: {} bytes, statements: {}\n", .{sz, count});
                     }
 
                     const globals_size = 0;
@@ -477,7 +722,7 @@ pub const LLType = union(enum) {
                         return scope.get(name);
                     }
                 }
-                return null;
+                return self.ctx.types.get(name);
             }
 
             fn typeCheckDefun(self: *@This(), defun: LLParser.UnresolvedLLAst.Defun) anyerror!TypedAst {
@@ -524,14 +769,24 @@ pub const LLType = union(enum) {
                 var body = std.ArrayList(TypedAst).init(self.ctx.allocator);
                 errdefer body.deinit();
 
+                var ret = self.ctx.types.get("void") orelse unreachable;
                 for (defun.body) |statement| {
                     const stmt = try self.typeCheckImpl(&statement);
                     body.append(stmt) catch unreachable;
+                    ret = stmt.typ;
+                }
+
+                if (!return_type.isVoid()) {
+                    try self.ctx.assertAcceptableType(fn_type.return_type, &ret);
                 }
 
                 self.closeScope();
 
                 self.pushIntoScope(name, .{
+                    .function = fn_type,
+                });
+
+                try self.ctx.pushType(name, .{
                     .function = fn_type,
                 });
 
@@ -600,6 +855,7 @@ pub const LLType = union(enum) {
 
                         const cs: Case = std.meta.stringToEnum(Case, call.name) orelse {
                             const fnType = self.lookup(call.name) orelse {
+                                std.debug.print("Unknown symbol {s}\n", .{call.name});
                                 return error.UnknownSymbol;
                             };
                             switch (fnType) {
@@ -634,7 +890,7 @@ pub const LLType = union(enum) {
                                     self.ctx.types.get("u32") orelse unreachable,
                                 };
                                 const typ = blk: inline for (typs) |*typ| {
-                                    if (fst.typ.equals(typ)) {
+                                    if (fst.typ.acceptsType(typ)) {
                                         break :blk typ;
                                     }
                                 } else {
@@ -672,6 +928,28 @@ pub const LLType = union(enum) {
                             .typ = typ,
                         };
                     },
+                    .int_value => |int_value| {
+                        return .{
+                            .ast = .{ .int_value = int_value },
+                            .typ = .{ .number_literal = .{ .negative = int_value < 0, .float = false } },
+                        };
+                    },
+                    .block_scope => |statements| {
+                        dump_and_fail(root);
+                        var ret = self.ctx.types.get("void") orelse unreachable;
+                        var checkedStatements = try std.ArrayList(TypedAst).initCapacity(self.ctx.allocator, statements.len);
+                        self.newScope();
+                        for (statements) |stmt| {
+                            const x = try self.typeCheckImpl(&stmt);
+                            checkedStatements.appendAssumeCapacity(x);
+                            ret = x.typ;
+                        }
+                        self.closeScope();
+                        return .{
+                            .ast = .{ .block_scope = try checkedStatements.toOwnedSlice() },
+                            .typ = ret,
+                        };
+                    },
                     else => {
                         dump_and_fail(root);
                         unreachable;
@@ -685,7 +963,7 @@ pub const LLType = union(enum) {
             // if (expr.is(expected)) {
             //     return;
             // }
-            if (expr.equals(expected)) {
+            if (expected.acceptsType(expr)) {
                 return;
             }
             return error.TypeMismatch; // TODO: better error message
@@ -797,11 +1075,17 @@ pub fn LLAst(comptime ExprT: fn(type) type, comptime TypT: type) type {
             const indent_str = indent_raw[0..indent];
             switch (self) {
                 .defun => |defun| {
-                    std.debug.print("{s}defun {s}(args): ", .{ indent_str, defun.name });
-                    ctx.print(defun.ret_type);
-                    std.debug.print("\n", .{});
+                    std.debug.print("{s}defun {s}:\n{s}  args:\n", .{ indent_str, defun.name, indent_str });
+                    for (defun.args) |arg| {
+                        std.debug.print("{s}    {s}:\n", .{ indent_str, arg.name });
+                        ctx.print(arg.typ, indent + 6);
+                        std.debug.print("\n", .{});
+                    }
+                    std.debug.print("{s}  return type:\n", .{ indent_str });
+                    ctx.print(defun.ret_type, indent + 4);
+                    std.debug.print("\nbody:\n", .{});
                     for (defun.body) |body| {
-                        body.print(indent + 2, ctx);
+                        body.print(indent + 4, ctx);
                     }
                 },
                 .symbol => |symbol| {
@@ -851,7 +1135,7 @@ pub fn LLAst(comptime ExprT: fn(type) type, comptime TypT: type) type {
                     }
                 },
                 .sexp => |sexp_idx| {
-                    ctx.print(sexp_idx);
+                    ctx.print(sexp_idx, indent);
                 },
             }
         }
@@ -923,7 +1207,7 @@ pub const LLParser = struct {
                 switch (cs) {
                     .defun => {
                         const defunArgs = items[1..];
-                        std.debug.assert(defunArgs.len > 3);
+                        std.debug.assert(defunArgs.len >= 3);
                         const retType = defunArgs[0];
                         const name = blk: {
                             const nameIdx = defunArgs[1];
