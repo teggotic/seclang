@@ -27,7 +27,7 @@ pub const CtxItem = union(enum) {
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    // defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     const f = try std.fs.cwd().openFile("t.sec", .{});
@@ -44,11 +44,11 @@ pub fn main() !void {
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var llastParser = llexp.LLParser.init(&ctx, arena);
+    //const arena = arena_state.allocator();
+    var llastParser = llexp.LLParser.init(&ctx, allocator);
     defer llastParser.deinit();
 
-    var llTypesContext = llexp.LLType.TypesContext.init(&ctx, arena);
+    var llTypesContext = llexp.LLType.TypesContext.init(&ctx, allocator);
     defer llTypesContext.deinit();
 
     var llTypeChecker = llexp.LLType.TypesContext.TypeChecker.init(&llTypesContext);
@@ -59,9 +59,9 @@ pub fn main() !void {
 
     var c: usize = 0;
 
-    var compileArena = std.heap.ArenaAllocator.init(allocator);
+    // var compileArena = std.heap.ArenaAllocator.init(allocator);
     while (try sexpIter.next()) |root| {
-        defer _ = compileArena.reset(.retain_capacity);
+        // defer _ = compileArena.reset(.retain_capacity);
         // defer {
         //     const res = arena_state.reset(.retain_capacity);
         //     std.debug.assert(res);
@@ -95,8 +95,7 @@ pub fn main() !void {
 
     std.debug.print("c = {}\n", .{c});
 
-    std.debug.print("ctx.impl.strings.len = {}\n", .{ctx.impl.strings.items.len});
-    std.debug.print("ctx.impl.strings.len = {}\n", .{ctx.impl.strings_raw.items.len});
+    std.debug.print("ctx.impl.strings_interner.strings.len = {}\n", .{ctx.impl.strings_interner.strings_raw.items.len});
     std.debug.print("ctx.impl.lists.len = {}\n", .{ctx.impl.lists.items.len});
     std.debug.print("ctx.impl.nodes.len = {}\n", .{ctx.impl.nodes.len});
     std.debug.print("ctx.impl.nodes.len - free_nodes = {}\n", .{ctx.impl.nodes.len - ctx.impl.free_nodes.items.len});

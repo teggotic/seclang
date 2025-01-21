@@ -11,46 +11,6 @@ fn dump_and_fail(value: anytype) noreturn {
     unreachable;
 }
 
-pub fn nextAlignment(offset: usize, alignment: usize) usize {
-    const rem = offset % alignment;
-    if (rem == 0) {
-        return offset;
-    }
-    return (offset - rem) + alignment;
-}
-
-test "nextAlignment" {
-    try std.testing.expectEqual(0, nextAlignment(0, 1));
-    try std.testing.expectEqual(0, nextAlignment(0, 2));
-    try std.testing.expectEqual(0, nextAlignment(0, 4));
-    try std.testing.expectEqual(0, nextAlignment(0, 8));
-
-    try std.testing.expectEqual(1, nextAlignment(1, 1));
-    try std.testing.expectEqual(2, nextAlignment(1, 2));
-    try std.testing.expectEqual(4, nextAlignment(1, 4));
-    try std.testing.expectEqual(8, nextAlignment(1, 8));
-
-    try std.testing.expectEqual(2, nextAlignment(2, 1));
-    try std.testing.expectEqual(2, nextAlignment(2, 2));
-    try std.testing.expectEqual(4, nextAlignment(2, 4));
-    try std.testing.expectEqual(8, nextAlignment(2, 8));
-
-    try std.testing.expectEqual(3, nextAlignment(3, 1));
-    try std.testing.expectEqual(4, nextAlignment(3, 2));
-    try std.testing.expectEqual(4, nextAlignment(3, 4));
-    try std.testing.expectEqual(8, nextAlignment(3, 8));
-
-    try std.testing.expectEqual(4, nextAlignment(4, 1));
-    try std.testing.expectEqual(4, nextAlignment(4, 2));
-    try std.testing.expectEqual(4, nextAlignment(4, 4));
-    try std.testing.expectEqual(8, nextAlignment(4, 8));
-
-    try std.testing.expectEqual(5, nextAlignment(5, 1));
-    try std.testing.expectEqual(6, nextAlignment(5, 2));
-    try std.testing.expectEqual(8, nextAlignment(5, 4));
-    try std.testing.expectEqual(8, nextAlignment(5, 8));
-}
-
 pub const LLType = union(enum) {
     fn AstT(comptime T: type) type {
         return struct {
@@ -77,7 +37,7 @@ pub const LLType = union(enum) {
         pub fn size(self: *const StructType) usize {
             var sz: usize = 0;
             for (self.fields) |field| {
-                sz = nextAlignment(sz, field.typ.alignment());
+                sz = sexp.nextAlignment(sz, field.typ.alignment());
                 sz += field.typ.size();
             }
             return sz;
@@ -95,7 +55,7 @@ pub const LLType = union(enum) {
         pub fn offsetOf(self: *const StructType, index: usize) usize {
             var offset: usize = 0;
             for (self.fields, 0..) |field, i| {
-                offset = nextAlignment(offset, field.typ.alignment());
+                offset = sexp.nextAlignment(offset, field.typ.alignment());
                 if (i == index) {
                     return offset;
                 }
@@ -173,10 +133,9 @@ pub const LLType = union(enum) {
                 switch (other.*) {
                     .integer => |other_int| return int.signed == other_int.signed and int.bits == other_int.bits,
                     .number_literal => |other_int| {
-                        if (other_int.float) { return false; }
-                        if (other_int.negative) {
-                            return int.signed;
-                        }
+                        if (other_int.float) return false;
+                        if (other_int.negative) return int.signed;
+
                         // TODO: check for overflow
                         return true;
                     },
@@ -214,6 +173,9 @@ pub const LLType = union(enum) {
         allocator: Allocator,
         sexpCtx: *sexp.Sexp.ParsingContext,
         types: std.StringHashMap(LLType),
+        impl: struct {
+            voidType: *LLType,
+        },
 
         pub fn init(sexpCtx: *sexp.Sexp.ParsingContext, allocator: Allocator) @This() {
             var types = std.StringHashMap(LLType).init(allocator);
@@ -234,22 +196,26 @@ pub const LLType = union(enum) {
             types.put("f64", .{ .floating = 64 }) catch unreachable;
 
             types.put("void", .{ .void = void{} }) catch unreachable;
-            types.put("sexp", .{ .pointer = types.getPtr("void") orelse unreachable }) catch unreachable;
+            const vp = allocator.create(LLType) catch unreachable;
+            vp.* = .{ .void = void{} };
 
-            return @This(){
+            return .{
                 .sexpCtx = sexpCtx,
                 .types = types,
                 .allocator = allocator,
+                .impl = .{
+                    .voidType = vp,
+                },
             };
         }
 
         pub fn deinit(self: *@This()) void {
             self.types.deinit();
+            self.allocator.destroy(self.impl.voidType);
         }
 
-        pub fn voidType(self: *@This()) LLType {
-            _ = self;
-            return .{ .void = void{} };
+        pub fn voidType(self: *@This()) *LLType {
+            return self.impl.voidType;
         }
 
         pub fn resolveRef(self: *@This(), ref: []const u8) !LLType {
@@ -287,6 +253,12 @@ pub const LLType = union(enum) {
             ctx: *TypesContext,
             functions: std.StringHashMap(Func),
             ks: *keystone.ks_engine,
+
+            const Builtins = struct {
+                fn print_int(i: u32) callconv(.C) void {
+                    std.debug.print("print_int: {d}\n", .{i});
+                }
+            };
 
             pub fn init(ctx: *TypesContext) *@This() {
                 std.debug.assert(globalThis == null);
@@ -326,6 +298,27 @@ pub const LLType = union(enum) {
                 };
                 globalThis = ptr;
 
+                ptr.functions.put("print_int", .{
+                    .builtin = .{
+                        .name = "print_int",
+                        .ptr = @constCast(@ptrCast(&Builtins.print_int)),
+                    }
+                }) catch unreachable;
+                const tp = ctx.allocator.create(LLType) catch unreachable;
+                tp.* = ctx.types.get("u32") orelse unreachable;
+                ctx.types.put("print_int", .{
+                    .function = .{
+                        .name = "print_int",
+                        .return_type = ctx.voidType(),
+                        .params = @constCast(&[_]FunctionType.Param{
+                            .{
+                                .name = "i",
+                                .typ = tp,
+                            }
+                        }),
+                    },
+                }) catch unreachable;
+
                 std.debug.assert(globalThis != null);
 
                 return ptr;
@@ -340,7 +333,6 @@ pub const LLType = union(enum) {
             }
 
             fn resolveSymbol(self: *@This(), symbol: []const u8, value: [*c]u64) bool {
-                std.debug.print("resolveSymbol: got symbol = {s}\n", .{symbol});
                 if (self.functions.get(symbol)) |f| {
                     switch (f) {
                         .builtin => |builtin| {
@@ -722,6 +714,11 @@ pub const LLType = union(enum) {
                         return scope.get(name);
                     }
                 }
+                var it = self.ctx.types.iterator();
+                while (it.next()) |e| {
+                    std.debug.print("{s}\n", .{e.key_ptr.*});
+                }
+                std.debug.print("lookup {s}\n", .{name});
                 return self.ctx.types.get(name);
             }
 
@@ -789,6 +786,7 @@ pub const LLType = union(enum) {
                 try self.ctx.pushType(name, .{
                     .function = fn_type,
                 });
+                std.debug.print("pushing {s}: {any}\n", .{ name, fn_type });
 
                 return .{
                     .ast = .{
@@ -826,7 +824,7 @@ pub const LLType = union(enum) {
                                 std.debug.assert(returnExpr == null);
                                 return .{
                                     .ast = .{ .returnStmt = null },
-                                    .typ = self.ctx.voidType(),
+                                    .typ = self.ctx.voidType().*,
                                 };
                             },
                             else => {
@@ -854,8 +852,9 @@ pub const LLType = union(enum) {
                         }
 
                         const cs: Case = std.meta.stringToEnum(Case, call.name) orelse {
+                            std.debug.print("asdsadasd: {s}\n", .{call.name});
                             const fnType = self.lookup(call.name) orelse {
-                                std.debug.print("Unknown symbol {s}\n", .{call.name});
+                                std.debug.print("Unknown symbol [{s}]\n", .{call.name});
                                 return error.UnknownSymbol;
                             };
                             switch (fnType) {

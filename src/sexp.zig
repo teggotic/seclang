@@ -1,6 +1,150 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+pub fn nextAlignment(offset: usize, alignment: usize) usize {
+    const rem = offset % alignment;
+    if (rem == 0) {
+        return offset;
+    }
+    return (offset - rem) + alignment;
+}
+
+test "nextAlignment" {
+    try std.testing.expectEqual(0, nextAlignment(0, 1));
+    try std.testing.expectEqual(0, nextAlignment(0, 2));
+    try std.testing.expectEqual(0, nextAlignment(0, 4));
+    try std.testing.expectEqual(0, nextAlignment(0, 8));
+
+    try std.testing.expectEqual(1, nextAlignment(1, 1));
+    try std.testing.expectEqual(2, nextAlignment(1, 2));
+    try std.testing.expectEqual(4, nextAlignment(1, 4));
+    try std.testing.expectEqual(8, nextAlignment(1, 8));
+
+    try std.testing.expectEqual(2, nextAlignment(2, 1));
+    try std.testing.expectEqual(2, nextAlignment(2, 2));
+    try std.testing.expectEqual(4, nextAlignment(2, 4));
+    try std.testing.expectEqual(8, nextAlignment(2, 8));
+
+    try std.testing.expectEqual(3, nextAlignment(3, 1));
+    try std.testing.expectEqual(4, nextAlignment(3, 2));
+    try std.testing.expectEqual(4, nextAlignment(3, 4));
+    try std.testing.expectEqual(8, nextAlignment(3, 8));
+
+    try std.testing.expectEqual(4, nextAlignment(4, 1));
+    try std.testing.expectEqual(4, nextAlignment(4, 2));
+    try std.testing.expectEqual(4, nextAlignment(4, 4));
+    try std.testing.expectEqual(8, nextAlignment(4, 8));
+
+    try std.testing.expectEqual(5, nextAlignment(5, 1));
+    try std.testing.expectEqual(6, nextAlignment(5, 2));
+    try std.testing.expectEqual(8, nextAlignment(5, 4));
+    try std.testing.expectEqual(8, nextAlignment(5, 8));
+}
+
+pub const Interner = struct {
+    pub const Strings = struct {
+        const StringsRaw = std.ArrayListUnmanaged(u8);
+        const LenSize = u32;
+
+        pub const Indexed = struct {
+            items: *StringsRaw,
+            pub inline fn get(self: *const @This(), idx: Index) []const u8 {
+                return idx.asStr(self.items);
+            }
+        };
+
+        pub const Index = enum(u32) {
+            _,
+
+            pub inline fn asStr(self: Index, strings_raw: *StringsRaw) []const u8 {
+                const slice = strings_raw.items[@intFromEnum(self)..];
+                const len = @as(*LenSize, @alignCast(@ptrCast(&strings_raw.items[@intFromEnum(self) - @sizeOf(LenSize)]))).*;
+                return slice[0..len];
+            }
+        };
+
+        pub const LookupKey = union(enum) {
+            index: Index,
+            string: []const u8,
+        };
+
+        pub const LookupKeyContext = struct {
+            strings_raw: *StringsRaw,
+
+            pub fn hash(self: *const @This(), s: LookupKey) u64 {
+                return std.hash_map.hashString(self.asString(s));
+            }
+            pub fn eql(self: *const @This(), a: LookupKey, b: LookupKey) bool {
+                return std.hash_map.eqlString(self.asString(a), self.asString(b));
+            }
+            pub inline fn asString(self: *const @This(), key: LookupKey) []const u8 {
+                switch (key) {
+                    .string => |s| return s,
+                    .index => |i| return i.asStr(self.strings_raw),
+                }
+            }
+        };
+
+        strings_raw: *StringsRaw,
+        string_lookup: std.HashMap(LookupKey, Index, LookupKeyContext, std.hash_map.default_max_load_percentage),
+        allocator: Allocator,
+
+        pub fn init(allocator: Allocator) Strings {
+            const strings_raw = allocator.create(std.ArrayListUnmanaged(u8)) catch unreachable;
+            strings_raw.* = .{};
+
+            return .{
+                .strings_raw = strings_raw,
+                .allocator = allocator,
+                .string_lookup = std.HashMap(LookupKey, Index, LookupKeyContext, std.hash_map.default_max_load_percentage).initContext(allocator, .{ .strings_raw = strings_raw }),
+            };
+        }
+
+        pub fn deinit(self: *Strings) void {
+            self.strings_raw.deinit(self.allocator);
+            self.allocator.destroy(self.strings_raw);
+            self.string_lookup.deinit();
+        }
+
+        pub fn tryIntern(self: *@This(), str: []const u8) !?Index {
+            if (str.len <= 16) {
+                return self.string_lookup.get(.{ .string = str });
+            }
+            return null;
+        }
+
+        pub inline fn getString(self: *@This(), idx: Index) []const u8 {
+            return idx.asStr(self.strings_raw);
+        }
+
+        pub fn pushString(self: *@This(), str: []const u8) !Index {
+            std.debug.assert(str.len > 0);
+            std.debug.assert(str.len < std.math.maxInt(LenSize));
+
+            if (try self.tryIntern(str)) |existing| {
+                return existing;
+            }
+
+            const nextAligned = nextAlignment(self.strings_raw.items.len, @sizeOf(LenSize));
+            const padding = nextAligned - self.strings_raw.items.len;
+
+            try self.strings_raw.ensureUnusedCapacity(self.allocator, padding + @sizeOf(LenSize) + str.len);
+
+            _ = self.strings_raw.addManyAsSliceAssumeCapacity(padding);
+            self.strings_raw.appendSliceAssumeCapacity(@as([*]u8, @constCast(@ptrCast(&str.len)))[0..@sizeOf(LenSize)]);
+
+            const idx: Index = @enumFromInt(self.strings_raw.items.len);
+
+            self.strings_raw.appendSliceAssumeCapacity(str);
+
+            if (str.len <= 16) {
+                self.string_lookup.put(.{ .index = idx }, idx) catch unreachable;
+            }
+            return idx;
+        }
+    };
+};
+
 pub const Sexp = struct {
     tag: Tag,
     data: Data,
@@ -16,8 +160,8 @@ pub const Sexp = struct {
 
     pub const Data = union {
         list: ParsingContext.Index.List,
-        symbol: ParsingContext.Index.String,
-        string: ParsingContext.Index.String,
+        symbol: Interner.Strings.Index,
+        string: Interner.Strings.Index,
         int_value: u32,
         float_value: f32,
         bool_value: bool,
@@ -26,7 +170,6 @@ pub const Sexp = struct {
     pub const ParsingContext = struct {
         pub const Index = struct {
             pub const Node = enum(u32) {_};
-            pub const String = enum(u32) {_};
             pub const List = enum(u32) {_};
         };
 
@@ -37,13 +180,10 @@ pub const Sexp = struct {
 
         allocator: Allocator,
         impl: struct {
-            strings_raw: std.ArrayList(u8),
+            strings_interner: Interner.Strings,
+
             lists_raw: std.ArrayList(Index.Node),
-
             lists: std.ArrayList(Slice),
-            strings: std.ArrayList(Slice),
-
-            string_interner: std.StringHashMap(Index.String),
 
             nodes: std.MultiArrayList(Sexp),
             free_nodes: std.ArrayList(Index.Node),
@@ -55,10 +195,8 @@ pub const Sexp = struct {
                 .impl = .{
                     .free_nodes = std.ArrayList(Index.Node).init(allocator),
                     .lists_raw = std.ArrayList(Index.Node).init(allocator),
-                    .strings_raw = std.ArrayList(u8).init(allocator),
                     .lists = std.ArrayList(Slice).init(allocator),
-                    .strings = std.ArrayList(Slice).init(allocator),
-                    .string_interner = std.StringHashMap(Index.String).init(allocator),
+                    .strings_interner = Interner.Strings.init(allocator),
                     .nodes = .{},
                 },
             };
@@ -66,10 +204,8 @@ pub const Sexp = struct {
 
         pub fn deinit(self: *@This()) void {
             self.impl.lists_raw.deinit();
-            self.impl.strings_raw.deinit();
             self.impl.lists.deinit();
-            self.impl.strings.deinit();
-            self.impl.string_interner.deinit();
+            self.impl.strings_interner.deinit();
             self.impl.nodes.deinit(self.allocator);
             self.impl.free_nodes.deinit();
         }
@@ -93,8 +229,8 @@ pub const Sexp = struct {
             return .{ .items = self.impl.lists.items };
         }
 
-        pub inline fn stringsItems(self: *@This()) IndexedBy(Index.String, Slice) {
-            return .{ .items = self.impl.strings.items };
+        pub inline fn stringsItems(self: *@This()) Interner.Strings.Indexed {
+            return .{ .items = self.impl.strings_interner.strings_raw };
         }
 
         pub inline fn nodesItems(self: *@This(), comptime field: Field) IndexedBy(Index.Node, FieldType(field)) {
@@ -105,9 +241,8 @@ pub const Sexp = struct {
             return self.impl.nodes.get(@intFromEnum(idx));
         }
 
-        pub inline fn getString(self: *@This(), idx: Index.String) []const u8 {
-            const slice = self.stringsItems().get(idx);
-            return self.impl.strings_raw.items[slice.start..slice.start + slice.size];
+        pub inline fn getString(self: *@This(), idx: Interner.Strings.Index) []const u8 {
+            return self.impl.strings_interner.getString(idx);
         }
 
         pub inline fn getList(self: *@This(), idx: Index.List) []Index.Node {
@@ -191,20 +326,8 @@ pub const Sexp = struct {
             return @enumFromInt(listidx);
         }
 
-        pub fn push_string(self: *@This(), str: []u8) Index.String {
-            if (str.len < 16) {
-                if (self.impl.string_interner.get(str)) |idx| {
-                    return idx;
-                }
-            }
-            const start = self.impl.strings_raw.items.len;
-            self.impl.strings_raw.appendSlice(str) catch unreachable;
-            const string_idx = self.impl.strings.items.len;
-            self.impl.strings.append(.{ .start = start, .size = str.len }) catch unreachable;
-            if (str.len < 16) {
-                self.impl.string_interner.put(str, @enumFromInt(string_idx)) catch unreachable;
-            }
-            return @enumFromInt(string_idx);
+        pub fn push_string(self: *@This(), str: []u8) Interner.Strings.Index {
+            return self.impl.strings_interner.pushString(str) catch unreachable;
         }
 
         pub fn push_node(self: *@This(), node: Sexp) Index.Node {
