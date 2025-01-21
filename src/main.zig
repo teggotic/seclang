@@ -6,6 +6,8 @@ const qbe = @import("qbe.zig");
 const sexp = @import("sexp.zig");
 const llexp = @import("llexp.zig");
 
+const Indexes = sexp.Interner.Indexes;
+
 var x: u32 = 100;
 
 fn extern_func(str: [*:0]const u8) callconv(.C) u32 {
@@ -17,7 +19,7 @@ fn extern_func(str: [*:0]const u8) callconv(.C) u32 {
 
 pub const CtxItem = union(enum) {
     Function: struct {
-        name: []const u8,
+        name: Indexes.String,
         fptr: []align(std.mem.page_size) const u8,
         pub fn deinit(self: *const @This()) void {
             posix.munmap(self.func_mem);
@@ -36,7 +38,12 @@ pub fn main() !void {
     const source = try f.readToEndAlloc(allocator, std.math.maxInt(usize));
     defer allocator.free(source);
 
-    var ctx = sexp.Sexp.ParsingContext.init(allocator);
+    var strings_interner = sexp.Interner.Strings.init(allocator);
+    defer strings_interner.deinit();
+
+    sexp.Interner.Strings.global = &strings_interner;
+
+    var ctx = sexp.Sexp.ParsingContext.init(allocator, &strings_interner);
     defer ctx.deinit();
 
     var sexpIter = ctx.createTopsIter(source);
@@ -88,7 +95,7 @@ pub fn main() !void {
         // std.debug.print("\n", .{});
     }
 
-    if (llJitContext.functions.get("main")) |mainF| {
+    if (llJitContext.functions.get(strings_interner.pushString("main"))) |mainF| {
         const func: *const (fn () callconv(.C) void) = @ptrCast(mainF.compiled.code);
         func();
     }

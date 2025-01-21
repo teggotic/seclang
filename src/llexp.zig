@@ -6,6 +6,8 @@ const Allocator = std.mem.Allocator;
 const SexpIndex = sexp.Sexp.ParsingContext.Index;
 const pretty = @import("pretty");
 
+const Indexes = sexp.Interner.Indexes;
+
 fn dump_and_fail(value: anytype) noreturn {
     pretty.print(std.heap.page_allocator, value, .{}) catch unreachable;
     unreachable;
@@ -31,7 +33,7 @@ pub const LLType = union(enum) {
     pub const TypedAst = AstT(LLAst(AstT, LLType));
 
     pub const StructType = struct {
-        name: []const u8,
+        name: Indexes.String,
         fields: []Field,
 
         pub fn size(self: *const StructType) usize {
@@ -43,7 +45,7 @@ pub const LLType = union(enum) {
             return sz;
         }
 
-        pub fn indexOf(self: *const StructType, fieldName: []const u8) ?usize {
+        pub fn indexOf(self: *const StructType, fieldName: Indexes.String) ?usize {
             for (self.fields, 0..) |field, idx| {
                 if (std.mem.eql(u8, field.name, fieldName)) {
                     return idx;
@@ -73,7 +75,7 @@ pub const LLType = union(enum) {
         }
         pub const Field = struct {
             typ: LLType,
-            name: []const u8,
+            name: Indexes.String,
         };
     };
 
@@ -97,12 +99,12 @@ pub const LLType = union(enum) {
     }
 
     pub const FunctionType = struct {
-        name: []const u8,
+        name: Indexes.String,
         return_type: *LLType,
         params: []Param,
 
         pub const Param = struct {
-            name: []const u8,
+            name: Indexes.String,
             typ: *LLType,
         };
     };
@@ -164,6 +166,7 @@ pub const LLType = union(enum) {
                 }
             },
             else => {
+                std.debug.print("Unknown type: {any}\n", .{self});
                 unreachable;
             }
         }
@@ -172,30 +175,30 @@ pub const LLType = union(enum) {
     pub const TypesContext = struct {
         allocator: Allocator,
         sexpCtx: *sexp.Sexp.ParsingContext,
-        types: std.StringHashMap(LLType),
+        types: std.AutoHashMap(Indexes.String, LLType),
         impl: struct {
             voidType: *LLType,
         },
 
         pub fn init(sexpCtx: *sexp.Sexp.ParsingContext, allocator: Allocator) @This() {
-            var types = std.StringHashMap(LLType).init(allocator);
+            var types = std.AutoHashMap(Indexes.String, LLType).init(allocator);
 
-            types.put("i8", .{ .integer = .{ .signed = true, .bits = 8 } }) catch unreachable;
-            types.put("u8", .{ .integer = .{ .signed = false, .bits = 8 } }) catch unreachable;
+            types.put(sexpCtx.impl.strings_interner.pushString("i8"), .{ .integer = .{ .signed = true, .bits = 8 } }) catch unreachable;
+            types.put(sexpCtx.impl.strings_interner.pushString("u8"), .{ .integer = .{ .signed = false, .bits = 8 } }) catch unreachable;
 
-            types.put("i16", .{ .integer = .{ .signed = true, .bits = 16 } }) catch unreachable;
-            types.put("u16", .{ .integer = .{ .signed = false, .bits = 16 } }) catch unreachable;
+            types.put(sexpCtx.impl.strings_interner.pushString("i16"), .{ .integer = .{ .signed = true, .bits = 16 } }) catch unreachable;
+            types.put(sexpCtx.impl.strings_interner.pushString("u16"), .{ .integer = .{ .signed = false, .bits = 16 } }) catch unreachable;
 
-            types.put("i32", .{ .integer = .{ .signed = true, .bits = 32 } }) catch unreachable;
-            types.put("u32", .{ .integer = .{ .signed = false, .bits = 32 } }) catch unreachable;
+            types.put(sexpCtx.impl.strings_interner.pushString("i32"), .{ .integer = .{ .signed = true, .bits = 32 } }) catch unreachable;
+            types.put(sexpCtx.impl.strings_interner.pushString("u32"), .{ .integer = .{ .signed = false, .bits = 32 } }) catch unreachable;
 
-            types.put("i64", .{ .integer = .{ .signed = true, .bits = 64 } }) catch unreachable;
-            types.put("u64", .{ .integer = .{ .signed = false, .bits = 64 } }) catch unreachable;
+            types.put(sexpCtx.impl.strings_interner.pushString("i64"), .{ .integer = .{ .signed = true, .bits = 64 } }) catch unreachable;
+            types.put(sexpCtx.impl.strings_interner.pushString("u64"), .{ .integer = .{ .signed = false, .bits = 64 } }) catch unreachable;
 
-            types.put("f32", .{ .floating = 32 }) catch unreachable;
-            types.put("f64", .{ .floating = 64 }) catch unreachable;
+            types.put(sexpCtx.impl.strings_interner.pushString("f32"), .{ .floating = 32 }) catch unreachable;
+            types.put(sexpCtx.impl.strings_interner.pushString("f64"), .{ .floating = 64 }) catch unreachable;
 
-            types.put("void", .{ .void = void{} }) catch unreachable;
+            types.put(sexpCtx.impl.strings_interner.pushString("void"), .{ .void = void{} }) catch unreachable;
             const vp = allocator.create(LLType) catch unreachable;
             vp.* = .{ .void = void{} };
 
@@ -218,14 +221,14 @@ pub const LLType = union(enum) {
             return self.impl.voidType;
         }
 
-        pub fn resolveRef(self: *@This(), ref: []const u8) !LLType {
+        pub fn resolveRef(self: *@This(), ref: Indexes.String) !LLType {
             const idx = self.types.get(ref) orelse {
                 return error.UnknownType;
             };
             return idx;
         }
 
-        pub fn pushType(self: *@This(), name: []const u8, ty: LLType) !void {
+        pub fn pushType(self: *@This(), name: Indexes.String, ty: LLType) !void {
             self.types.put(name, ty) catch unreachable;
         }
 
@@ -233,7 +236,7 @@ pub const LLType = union(enum) {
             var globalThis: ?*@This() = null;
 
             pub const CompiledFunction = struct {
-                name: []const u8,
+                name: Indexes.String,
                 code: []const align(std.mem.page_size)u8,
                 fn_type: LLType.FunctionType,
 
@@ -242,7 +245,7 @@ pub const LLType = union(enum) {
                 }
             };
             pub const BuiltinFunction = struct {
-                name: []const u8,
+                name: Indexes.String,
                 ptr: *void,
             };
             pub const Func = union(enum) {
@@ -251,7 +254,7 @@ pub const LLType = union(enum) {
             };
 
             ctx: *TypesContext,
-            functions: std.StringHashMap(Func),
+            functions: std.AutoHashMap(Indexes.String, Func),
             ks: *keystone.ks_engine,
 
             const Builtins = struct {
@@ -293,32 +296,37 @@ pub const LLType = union(enum) {
 
                 ptr.* = .{
                     .ctx = ctx,
-                    .functions = std.StringHashMap(Func).init(ctx.allocator),
+                    .functions = std.AutoHashMap(Indexes.String, Func).init(ctx.allocator),
                     .ks = ks,
                 };
                 globalThis = ptr;
 
-                ptr.functions.put("print_int", .{
-                    .builtin = .{
-                        .name = "print_int",
-                        .ptr = @constCast(@ptrCast(&Builtins.print_int)),
-                    }
-                }) catch unreachable;
-                const tp = ctx.allocator.create(LLType) catch unreachable;
-                tp.* = ctx.types.get("u32") orelse unreachable;
-                ctx.types.put("print_int", .{
-                    .function = .{
-                        .name = "print_int",
-                        .return_type = ctx.voidType(),
-                        .params = @constCast(&[_]FunctionType.Param{
-                            .{
-                                .name = "i",
-                                .typ = tp,
-                            }
-                        }),
-                    },
-                }) catch unreachable;
-
+                {
+                    const n = ctx.sexpCtx.impl.strings_interner.pushString("print_int");
+                    ptr.functions.put(n, .{
+                        .builtin = .{
+                            .name = n,
+                            .ptr = @constCast(@ptrCast(&Builtins.print_int)),
+                        }
+                    }) catch unreachable;
+                    const tp = ctx.allocator.create(LLType) catch unreachable;
+                    const params = ctx.allocator.dupe(FunctionType.Param, &[_]FunctionType.Param{
+                        .{
+                            .name = ctx.sexpCtx.impl.strings_interner.pushString("print_int"),
+                            .typ = tp,
+                        }
+                    }) catch unreachable;
+                    tp.* = ctx.types.get(ctx.sexpCtx.impl.strings_interner.pushString("u32")) orelse unreachable;
+                    const x: LLType = .{
+                        .function = .{
+                            .name = n,
+                            .return_type = ctx.voidType(),
+                            .params = @constCast(params),
+                        },
+                    };
+                    std.debug.print("putting {s}: {any}\n", .{ "print_int", x });
+                    ctx.types.put(n, x) catch unreachable;
+                }
                 std.debug.assert(globalThis != null);
 
                 return ptr;
@@ -332,7 +340,7 @@ pub const LLType = union(enum) {
                 // self.ctx.allocator.destroy(globalThis.?);
             }
 
-            fn resolveSymbol(self: *@This(), symbol: []const u8, value: [*c]u64) bool {
+            fn resolveSymbol(self: *@This(), symbol: Indexes.String, value: [*c]u64) bool {
                 if (self.functions.get(symbol)) |f| {
                     switch (f) {
                         .builtin => |builtin| {
@@ -352,7 +360,8 @@ pub const LLType = union(enum) {
             fn symResolver(symbol: [*c]u8, value: [*c]u64) callconv(.C) bool {
                 const s = symbol[0..std.mem.len(symbol)];
                 std.debug.assert(globalThis != null);
-                return globalThis.?.resolveSymbol(s, value);
+                const n = globalThis.?.ctx.sexpCtx.impl.strings_interner.pushString(s);
+                return globalThis.?.resolveSymbol(n, value);
             }
 
             pub fn compile(self: *@This(), func: TypedAst, allocator: Allocator) !CompiledFunction {
@@ -363,14 +372,14 @@ pub const LLType = union(enum) {
             }
 
             pub const Compiler = struct {
-                const Scope = std.StringHashMapUnmanaged(ValueRef);
+                const Scope = std.AutoHashMapUnmanaged(Indexes.String, ValueRef);
                 jitCtx: *JitContext,
                 qbeState: struct {
                     fdin: std.posix.fd_t,
                     writer: std.fs.File.Writer,
                 },
                 scopes: std.ArrayListUnmanaged(Scope) = .{},
-                globals_to_process: std.StringHashMapUnmanaged(struct { name: ValueRef, typ: LLType, ref: ValueRef }) = .{},
+                globals_to_process: std.AutoHashMapUnmanaged(Indexes.String, struct { name: ValueRef, typ: LLType, ref: ValueRef }) = .{},
                 vari: usize = 0,
                 allocator: Allocator,
 
@@ -402,14 +411,14 @@ pub const LLType = union(enum) {
                     scope.deinit(self.allocator);
                 }
 
-                pub fn pushIntoScope(self: *@This(), name: []const u8, typ: ValueRef) void {
+                pub fn pushIntoScope(self: *@This(), name: Indexes.String, typ: ValueRef) void {
                     std.debug.assert(self.scopes.items.len > 0);
                     var scope = &self.scopes.items[self.scopes.items.len - 1];
                     std.debug.assert(!scope.contains(name));
                     scope.put(self.allocator, name, typ) catch unreachable;
                 }
 
-                pub fn lookup(self: *@This(), name: []const u8) ?ValueRef {
+                pub fn lookup(self: *@This(), name: Indexes.String) ?ValueRef {
                     std.debug.assert(self.scopes.items.len > 0);
                     for (0..self.scopes.items.len) |i| {
                         const idx = self.scopes.items.len - 1 - i;
@@ -471,12 +480,12 @@ pub const LLType = union(enum) {
 
                 fn emitQBE(self: *@This(), defun: TypedAst.Ast.Defun, fn_type: LLType.FunctionType) !void {
                     self.newScope();
-                    self.format("function {s} ${s}(", .{try self.t2s(fn_type.return_type.*), defun.name});
+                    self.format("function {s} ${s}(", .{try self.t2s(fn_type.return_type.*), defun.name.asString()});
                     for (fn_type.params, 0..) |param, i| {
                         if (i > 0) {
                             self.format(", ", .{});
                         }
-                        self.format("{s} %arg_{s}", .{try self.t2s(param.typ.*), param.name});
+                        self.format("{s} %arg_{s}", .{try self.t2s(param.typ.*), param.name.asString()});
                         self.pushIntoScope(param.name, .{ .arg = param.name });
                     }
                     self.format(") {{\n", .{});
@@ -498,9 +507,9 @@ pub const LLType = union(enum) {
                 const ValueRef = union(enum) {
                     none,
                     local: usize,
-                    arg: []const u8,
-                    global: []const u8,
-                    external_global: []const u8,
+                    arg: Indexes.String,
+                    global: Indexes.String,
+                    external_global: Indexes.String,
                     integer: isize,
 
                     pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
@@ -513,13 +522,13 @@ pub const LLType = union(enum) {
                                 try std.fmt.format(writer, "%v_{}", .{local});
                             },
                             .arg => |arg| {
-                                try std.fmt.format(writer, "%arg_{s}", .{arg});
+                                try std.fmt.format(writer, "%arg_{s}", .{arg.asString()});
                             },
                             .global => |global| {
-                                try std.fmt.format(writer, "${s}", .{global});
+                                try std.fmt.format(writer, "${s}", .{global.asString()});
                             },
                             .external_global => |global| {
-                                try std.fmt.format(writer, "$ref_{s}", .{global});
+                                try std.fmt.format(writer, "$ref_{s}", .{global.asString()});
                             },
                             .integer => |int| {
                                 try std.fmt.format(writer, "{}", .{int});
@@ -540,7 +549,8 @@ pub const LLType = union(enum) {
                             const Builtin = enum {
                                 @"+",
                             };
-                            const builtin = std.meta.stringToEnum(Builtin, call.name) orelse {
+                            const callName = call.name.asString();
+                            const builtin = std.meta.stringToEnum(Builtin, callName) orelse {
                                 const fnType = self.jitCtx.ctx.types.get(call.name) orelse {
                                     dump_and_fail(.{.call = call});
                                 };
@@ -644,8 +654,8 @@ pub const LLType = union(enum) {
                     };
                 }
 
-                fn qbeCompile(self: *@This(), entrypoint: []const u8) !qbe.CompiledInstructions {
-                    return qbe.compile(self.qbeState.fdin, entrypoint);
+                fn qbeCompile(self: *@This(), entrypoint: Indexes.String) !qbe.CompiledInstructions {
+                    return qbe.compile(self.qbeState.fdin, entrypoint.asString());
                 }
 
                 fn jitCode(self: *@This(), code: [*c]const u8) ![]const align(std.mem.page_size)u8 {
@@ -673,7 +683,7 @@ pub const LLType = union(enum) {
         };
 
         pub const TypeChecker = struct {
-            const Scope = std.StringHashMap(LLType);
+            const Scope = std.AutoHashMap(Indexes.String, LLType);
             scopes: std.ArrayList(Scope),
             ctx: *TypesContext,
             current_fn: ?LLType.FunctionType = null,
@@ -698,14 +708,14 @@ pub const LLType = union(enum) {
                 scope.deinit();
             }
 
-            pub fn pushIntoScope(self: *@This(), name: []const u8, typ: LLType) void {
+            pub fn pushIntoScope(self: *@This(), name: Indexes.String, typ: LLType) void {
                 std.debug.assert(self.scopes.items.len > 0);
                 var scope = &self.scopes.items[self.scopes.items.len - 1];
                 std.debug.assert(!scope.contains(name));
                 scope.put(name, typ) catch unreachable;
             }
 
-            pub fn lookup(self: *@This(), name: []const u8) ?LLType {
+            pub fn lookup(self: *@This(), name: Indexes.String) ?LLType {
                 std.debug.assert(self.scopes.items.len > 0);
                 for (0..self.scopes.items.len) |i| {
                     const idx = self.scopes.items.len - 1 - i;
@@ -716,9 +726,9 @@ pub const LLType = union(enum) {
                 }
                 var it = self.ctx.types.iterator();
                 while (it.next()) |e| {
-                    std.debug.print("{s}\n", .{e.key_ptr.*});
+                    std.debug.print("{s}\n", .{e.key_ptr.asString()});
                 }
-                std.debug.print("lookup {s}\n", .{name});
+                std.debug.print("lookup {s}\n", .{name.asString()});
                 return self.ctx.types.get(name);
             }
 
@@ -766,7 +776,7 @@ pub const LLType = union(enum) {
                 var body = std.ArrayList(TypedAst).init(self.ctx.allocator);
                 errdefer body.deinit();
 
-                var ret = self.ctx.types.get("void") orelse unreachable;
+                var ret = self.ctx.types.get(self.ctx.sexpCtx.impl.strings_interner.pushString("void")) orelse unreachable;
                 for (defun.body) |statement| {
                     const stmt = try self.typeCheckImpl(&statement);
                     body.append(stmt) catch unreachable;
@@ -786,7 +796,7 @@ pub const LLType = union(enum) {
                 try self.ctx.pushType(name, .{
                     .function = fn_type,
                 });
-                std.debug.print("pushing {s}: {any}\n", .{ name, fn_type });
+                std.debug.print("pushing {s}: {any}\n", .{ name.asString(), fn_type });
 
                 return .{
                     .ast = .{
@@ -851,10 +861,10 @@ pub const LLType = union(enum) {
                             args.append(argTyped) catch unreachable;
                         }
 
-                        const cs: Case = std.meta.stringToEnum(Case, call.name) orelse {
-                            std.debug.print("asdsadasd: {s}\n", .{call.name});
+                        const callName = call.name.asString();
+                        const cs: Case = std.meta.stringToEnum(Case, callName) orelse {
                             const fnType = self.lookup(call.name) orelse {
-                                std.debug.print("Unknown symbol [{s}]\n", .{call.name});
+                                std.debug.print("Unknown symbol [{s}]\n", .{callName});
                                 return error.UnknownSymbol;
                             };
                             switch (fnType) {
@@ -885,8 +895,8 @@ pub const LLType = union(enum) {
                             .@"+" => {
                                 const fst = args.items[0];
                                 const typs = &[_]LLType {
-                                    self.ctx.types.get("i32") orelse unreachable,
-                                    self.ctx.types.get("u32") orelse unreachable,
+                                    self.ctx.types.get(self.ctx.sexpCtx.impl.strings_interner.pushString("i32")) orelse unreachable,
+                                    self.ctx.types.get(self.ctx.sexpCtx.impl.strings_interner.pushString("u32")) orelse unreachable,
                                 };
                                 const typ = blk: inline for (typs) |*typ| {
                                     if (fst.typ.acceptsType(typ)) {
@@ -914,11 +924,11 @@ pub const LLType = union(enum) {
                     },
                     .symbol => |symbol| {
                         const typ = self.lookup(symbol.name) orelse {
-                            std.debug.print("symbol = {s}\n", .{symbol.name});
+                            std.debug.print("symbol = {s}\n", .{symbol.name.asString()});
                             const scope = self.scopes.items[self.scopes.items.len - 1];
                             var iter = scope.iterator();
                             while (iter.next()) |item| {
-                                std.debug.print("{s}\n", .{item.key_ptr.*});
+                                std.debug.print("{s}\n", .{item.key_ptr.asString()});
                             }
                             return error.UnknownSymbol;
                         };
@@ -980,7 +990,7 @@ pub const LLType = union(enum) {
                     return error.NotATypeReference;
                 },
                 .symbol => {
-                    const name = self.sexpCtx.getString(data.get(root).symbol);
+                    const name = data.get(root).symbol;
                     return try self.resolveRef(name);
                 },
             }
@@ -992,26 +1002,26 @@ pub fn LLAst(comptime ExprT: fn(type) type, comptime TypT: type) type {
     return union(enum) {
         pub const Self = @This();
         pub const Defun = struct {
-            name: []const u8,
+            name: Indexes.String,
             ret_type: TypT,
             args: []Arg,
             body: []ExprT(Self),
 
             pub const Arg = struct {
-                name: []const u8,
+                name: Indexes.String,
                 typ: TypT,
             };
         };
 
         defun: Defun,
         symbol: struct {
-            name: []const u8,
+            name: Indexes.String,
         },
         string: struct {
-            name: []const u8,
+            name: Indexes.String,
         },
         call: struct {
-            name: []const u8,
+            name: Indexes.String,
             args: []ExprT(Self),
         },
         int_value: isize,
@@ -1020,7 +1030,7 @@ pub fn LLAst(comptime ExprT: fn(type) type, comptime TypT: type) type {
         sexp: SexpIndex.Node,
         block_scope: []ExprT(Self),
         defvar: struct {
-            name: []const u8,
+            name: Indexes.String,
             typ: TypT,
             value: ?*ExprT(Self),
         },
@@ -1074,9 +1084,9 @@ pub fn LLAst(comptime ExprT: fn(type) type, comptime TypT: type) type {
             const indent_str = indent_raw[0..indent];
             switch (self) {
                 .defun => |defun| {
-                    std.debug.print("{s}defun {s}:\n{s}  args:\n", .{ indent_str, defun.name, indent_str });
+                    std.debug.print("{s}defun {s}:\n{s}  args:\n", .{ indent_str, defun.name.asString(), indent_str });
                     for (defun.args) |arg| {
-                        std.debug.print("{s}    {s}:\n", .{ indent_str, arg.name });
+                        std.debug.print("{s}    {s}:\n", .{ indent_str, arg.name.asString() });
                         ctx.print(arg.typ, indent + 6);
                         std.debug.print("\n", .{});
                     }
@@ -1088,10 +1098,10 @@ pub fn LLAst(comptime ExprT: fn(type) type, comptime TypT: type) type {
                     }
                 },
                 .symbol => |symbol| {
-                    std.debug.print("{s}symbol {s}\n", .{ indent_str, symbol.name });
+                    std.debug.print("{s}symbol {s}\n", .{ indent_str, symbol.name.asString() });
                 },
                 .string => |string| {
-                    std.debug.print("{s}string {s}\n", .{ indent_str, string.name });
+                    std.debug.print("{s}string {s}\n", .{ indent_str, string.name.asString() });
                 },
                 .int_value => |int_value| {
                     std.debug.print("{s}int_value {}\n", .{ indent_str, int_value });
@@ -1103,7 +1113,7 @@ pub fn LLAst(comptime ExprT: fn(type) type, comptime TypT: type) type {
                     std.debug.print("{s}bool_value {}\n", .{ indent_str, bool_value });
                 },
                 .call => |call| {
-                    std.debug.print("{s}call {s}\n", .{ indent_str, call.name });
+                    std.debug.print("{s}call {s}\n", .{ indent_str, call.name.asString() });
                     for (call.args) |arg| {
                         arg.print(indent + 2, ctx);
                     }
@@ -1117,12 +1127,12 @@ pub fn LLAst(comptime ExprT: fn(type) type, comptime TypT: type) type {
                 .defvar => |defvar| {
                     if (defvar.value) |value| {
                         _ = value;
-                        std.debug.print("{s}defvar {s} =\n", .{ indent_str, defvar.name });
+                        std.debug.print("{s}defvar {s} =\n", .{ indent_str, defvar.name.asString() });
                         // if (ExprT(X) == SexpIndex.Node) {
                         //     value.print(indent + 2, ctx);
                         // }
                     } else {
-                        std.debug.print("{s}defvar {s} uninitialized\n", .{ indent_str, defvar.name });
+                        std.debug.print("{s}defvar {s} uninitialized\n", .{ indent_str, defvar.name.asString() });
                     }
                 },
                 .returnStmt => |returnStmt| {
@@ -1167,10 +1177,10 @@ pub const LLParser = struct {
         const data = self.sexpCtx.nodesItems(.data);
         switch (tags.get(root)) {
             .symbol => {
-                return .{ .symbol = .{ .name = self.sexpCtx.getString(data.get(root).symbol) } };
+                return .{ .symbol = .{ .name = data.get(root).symbol } };
             },
             .string => {
-                return .{ .string = .{ .name = self.sexpCtx.getString(data.get(root).string) } };
+                return .{ .string = .{ .name = data.get(root).string } };
             },
             .int_value => return .{ .int_value = data.get(root).int_value },
             .float_value => return .{ .float_value = data.get(root).float_value },
@@ -1181,7 +1191,7 @@ pub const LLParser = struct {
                 const fst = blk: {
                     switch (tags.get(items[0])) {
                         .symbol => {
-                            break :blk self.sexpCtx.getString(data.get(items[0]).symbol);
+                            break :blk data.get(items[0]).symbol;
                         },
                         else => {
                             return error.InvalidCall;
@@ -1195,7 +1205,7 @@ pub const LLParser = struct {
                     @"return",
                 };
 
-                const cs: Case = std.meta.stringToEnum(Case, fst) orelse {
+                const cs: Case = std.meta.stringToEnum(Case, self.sexpCtx.getString(fst)) orelse {
                     var args = std.ArrayList(UnresolvedLLAst).initCapacity(self.allocator, items.len - 1) catch unreachable;
                     for (items[1..]) |item| {
                         args.appendAssumeCapacity(try self.parse(item));
@@ -1211,7 +1221,7 @@ pub const LLParser = struct {
                         const name = blk: {
                             const nameIdx = defunArgs[1];
                             std.debug.assert(tags.get(nameIdx) == .symbol);
-                            break :blk self.sexpCtx.getString(data.get(nameIdx).symbol);
+                            break :blk data.get(nameIdx).symbol;
                         };
                         const args = blk: {
                             const argsIdx = defunArgs[2];
@@ -1226,7 +1236,7 @@ pub const LLParser = struct {
                                 std.debug.assert(argPair.len == 2);
                                 const argNameIdx = argPair[0];
                                 std.debug.assert(tags.get(argNameIdx) == .symbol);
-                                const argName = self.sexpCtx.getString(data.get(argNameIdx).symbol);
+                                const argName = data.get(argNameIdx).symbol;
                                 argsList.appendAssumeCapacity(.{ .typ = argPair[1], .name = argName });
                             }
                             break :blk try argsList.toOwnedSlice();
@@ -1258,7 +1268,7 @@ pub const LLParser = struct {
                         const name = blk: {
                             const nameIdx = items[1];
                             std.debug.assert(tags.get(nameIdx) == .symbol);
-                            break :blk self.sexpCtx.getString(data.get(nameIdx).symbol);
+                            break :blk data.get(nameIdx).symbol;
                         };
                         const typIdx = items[2];
                         const value = if (items.len > 2) blk: {
