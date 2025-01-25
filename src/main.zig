@@ -63,11 +63,13 @@ pub fn main() !void {
     var llTypesContext = llexp.LLType.TypesContext.init(&ctx, allocator);
     defer llTypesContext.deinit();
 
-    var llTypeChecker = llexp.LLType.TypesContext.TypeChecker.init(&llTypesContext);
+    var llTypeChecker = llexp.LLType.TypesContext.TypeChecker.init(llTypesContext);
     defer llTypeChecker.deinit();
 
-    var llJitContext = llexp.LLType.TypesContext.JitContext.init(&llTypesContext);
+    var llJitContext = llexp.LLType.TypesContext.JitContext.init(llTypesContext);
     defer llJitContext.deinit();
+
+    _ = llexp.LLType.TypesContext.JitContext.Builtins.fix_hex(@ptrFromInt(0x11));
 
     var c: usize = 0;
 
@@ -86,8 +88,11 @@ pub fn main() !void {
         const typeCheckedAst = try llTypeChecker.typeCheck(&ast);
         // pretty.print(std.heap.page_allocator, typeCheckedAst, .{}) catch unreachable;
 
-        const compiledFunction = llJitContext.compile(typeCheckedAst, arena_state.allocator()) catch unreachable;
-        llJitContext.functions.put(compiledFunction.name, .{ .compiled = compiledFunction }) catch unreachable;
+        if (typeCheckedAst.ast == .defun) {
+            const compiledFunction = llJitContext.compile(typeCheckedAst, arena_state.allocator()) catch unreachable;
+            // std.debug.print("compiled function: {s} {any}\n", .{compiledFunction.name.asString(), compiledFunction});
+            llTypesContext.pushFunction(compiledFunction.name, .{ .compiled = compiledFunction });
+        }
         // const func: *const (fn (u32, u32) callconv(.C) u32) = @ptrCast(compiledFunction.code);
         // const xxx = func(20, 47);
         // std.debug.print("func(...) = {}\n", .{xxx});
@@ -100,7 +105,7 @@ pub fn main() !void {
         // std.debug.print("\n", .{});
     }
 
-    if (llJitContext.functions.get(strings_interner.pushString("main"))) |mainF| {
+    if (llTypesContext.functions.get(strings_interner.intern("main"))) |mainF| {
         const func: *const (fn () callconv(.C) void) = @ptrCast(mainF.compiled.code);
         func();
     }

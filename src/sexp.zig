@@ -127,11 +127,11 @@ pub const Interner = struct {
             return null;
         }
 
-        pub inline fn getString(self: *@This(), idx: Index) []const u8 {
+        pub inline fn get(self: *@This(), idx: Index) []const u8 {
             return idx.asStr(self.strings_raw);
         }
 
-        pub fn pushString(self: *@This(), str: []const u8) Index {
+        pub fn intern(self: *@This(), str: []const u8) Index {
             std.debug.assert(str.len > 0);
             std.debug.assert(str.len < std.math.maxInt(LenSize));
 
@@ -400,11 +400,11 @@ pub const Sexp = struct {
                             return self.ctx.push_node(Sexp { .tag = .bool_value, .data = .{ .bool_value = token.bool_value } });
                         },
                         .symbol => {
-                            const x = Interner.Strings.g.pushString(self.lexer.string.?);
+                            const x = Interner.Strings.g.intern(self.lexer.string.?);
                             return self.ctx.push_node(Sexp { .tag = .symbol, .data = .{ .symbol = x } });
                         },
                         .str => {
-                            return self.ctx.push_node(Sexp { .tag = .string, .data = .{ .string = Interner.Strings.g.pushString(self.lexer.string.?) } });
+                            return self.ctx.push_node(Sexp { .tag = .string, .data = .{ .string = Interner.Strings.g.intern(self.lexer.string.?) } });
                         },
                         .r_paren => {
                             return error.UnexpectedRParen;
@@ -476,27 +476,25 @@ pub const Sexp = struct {
                     if (self.source.len == 0) {
                         return;
                     }
-                    if (self.source[0] == ';') {
-                        const i = blk: for (0..self.source.len) |i| {
-                            if (self.source[i] == '\n') {
-                                break :blk i;
-                            }
-                        } else {
-                            unreachable;
-                        };
-                        self.skip_bytes(i);
-                    }
                     if (self.source.len == 0) {
                         return;
                     }
                     var i: usize = 0;
+                    var isComment: bool = false;
                     while (i < self.source.len) {
                         switch (self.source[i]) {
-                            ' ', '\n', '\r' => {
-                                i += 1;
+                            ' ', '\r' => {},
+                            '\n' => {
+                                isComment = false;
                             },
-                            else => break,
+                            ';' => {
+                                isComment = true;
+                            },
+                            else => {
+                                if (!isComment) break;
+                            },
                         }
+                        i += 1;
                     }
                     self.skip_bytes(i);
                 }
@@ -581,7 +579,7 @@ pub const Sexp = struct {
                             return .{ .str = void{} };
                         },
                         else => {
-                            std.debug.print("Invalid token: {}\n", .{self.source[0]});
+                            std.debug.print("Invalid token: {c}\n", .{self.source[0]});
                             return error.InvalidToken;
                         },
                     }

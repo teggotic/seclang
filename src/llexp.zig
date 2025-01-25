@@ -84,6 +84,8 @@ pub const LLType = struct {
         pub const Index = enum(u32) {
             any,
 
+            @"opaque",
+
             void,
             bool,
 
@@ -194,7 +196,7 @@ pub const LLType = struct {
                     .f32 => 4,
                     .f64 => 8,
 
-                    else => switch (self.in(TypeInterner.g.types.items(.tag))) {
+                    _ => switch (self.in(TypeInterner.g.types.items(.tag))) {
                         .number_literal => unreachable,
                         .pointer => return 8,
                         .struct_ => return self.in(TypeInterner.g.types.items(.data)).struct_.sizeBytes(),
@@ -235,13 +237,13 @@ pub const LLType = struct {
                                 return true;
                             },
                             else => {
-                                return false;
+                                unreachable;
                             },
                         }
                     },
-                    .number_literal => {
+                    inline .number_literal, .negative_number_literal, .float_number_literal, .negative_float_number_literal => {
                         switch (actual) {
-                            .number_literal => {
+                            inline .number_literal, .negative_number_literal, .float_number_literal, .negative_float_number_literal => {
                                 const num = expected.forceData(.number_literal);
                                 const other_num = actual.forceData(.number_literal);
                                 if (num.float != other_num.float) {
@@ -260,9 +262,39 @@ pub const LLType = struct {
                             },
                         }
                     },
-                    else => {
+                    .any, .@"opaque", .void, .bool, .f32, .f64 => {
                         std.debug.print("Unknown type: {any}\n", .{expected});
                         unreachable;
+                    },
+                    _ => {
+                        const tags = TypeInterner.g.types.items(.tag);
+                        switch (expected.in(tags)) {
+                            .pointer => {
+                                const ptr = expected.forceData(.pointer);
+                                switch (actual) {
+                                    .any, .@"opaque", .void, .bool, .u8, .i8, .u16, .i16, .u32, .i32, .u64, .i64, .f32, .f64, .number_literal, .negative_number_literal, .float_number_literal, .negative_float_number_literal => |x| {
+                                        std.debug.print("Unknown type: {any} {any}\n", .{expected, x});
+                                        unreachable;
+                                    },
+                                    _ => {
+                                        switch (actual.in(tags)) {
+                                            .pointer => {
+                                                const ptr2 = actual.forceData(.pointer);
+                                                return ptr.acceptsType(ptr2);
+                                            },
+                                            else => {
+                                                std.debug.print("Unknown type: {any}\n", .{actual});
+                                                unreachable;
+                                            }
+                                        }
+                                    },
+                                }
+                            },
+                            else => |x| {
+                                std.debug.print("Unknown type: {any} {any}\n", .{expected, x});
+                                unreachable;
+                            }
+                        }
                     }
                 }
             }
@@ -332,36 +364,51 @@ pub const LLType = struct {
     pub const TypesContext = struct {
         allocator: Allocator,
         sexpCtx: *sexp.Sexp.ParsingContext,
-        types: std.AutoHashMap(Indexes.String, TypeInterner.Index),
+        functions: std.AutoHashMapUnmanaged(Indexes.String, JitContext.Func),
+        types: std.AutoHashMapUnmanaged(Indexes.String, TypeInterner.Index),
 
-        pub fn init(sexpCtx: *sexp.Sexp.ParsingContext, allocator: Allocator) @This() {
-            var types = std.AutoHashMap(Indexes.String, TypeInterner.Index).init(allocator);
+        pub fn init(sexpCtx: *sexp.Sexp.ParsingContext, allocator: Allocator) *@This() {
+            const ptr = allocator.create(@This()) catch unreachable;
 
-            types.put(Interner.Strings.g.pushString("void"), TypeInterner.Index.void) catch unreachable;
-            types.put(Interner.Strings.g.pushString("bool"), TypeInterner.Index.bool) catch unreachable;
-
-            types.put(Interner.Strings.g.pushString("i8"), TypeInterner.Index.i8) catch unreachable;
-            types.put(Interner.Strings.g.pushString("i16"), TypeInterner.Index.i16) catch unreachable;
-            types.put(Interner.Strings.g.pushString("i32"), TypeInterner.Index.i32) catch unreachable;
-            types.put(Interner.Strings.g.pushString("i64"), TypeInterner.Index.i64) catch unreachable;
-
-            types.put(Interner.Strings.g.pushString("u8"), TypeInterner.Index.u8) catch unreachable;
-            types.put(Interner.Strings.g.pushString("u16"), TypeInterner.Index.u16) catch unreachable;
-            types.put(Interner.Strings.g.pushString("u32"), TypeInterner.Index.u32) catch unreachable;
-            types.put(Interner.Strings.g.pushString("u64"), TypeInterner.Index.u64) catch unreachable;
-
-            types.put(Interner.Strings.g.pushString("f32"), TypeInterner.Index.f32) catch unreachable;
-            types.put(Interner.Strings.g.pushString("f64"), TypeInterner.Index.f64) catch unreachable;
-
-            return .{
+            ptr.* = .{
                 .sexpCtx = sexpCtx,
-                .types = types,
+                .types = .{},
+                .functions = .{},
                 .allocator = allocator,
             };
+
+            ptr.pushType(Interner.Strings.g.intern("void"), TypeInterner.Index.void);
+            ptr.pushType(Interner.Strings.g.intern("bool"), TypeInterner.Index.bool);
+
+            ptr.pushType(Interner.Strings.g.intern(  "i8"), TypeInterner.Index.i8);
+            ptr.pushType(Interner.Strings.g.intern( "i16"), TypeInterner.Index.i16);
+            ptr.pushType(Interner.Strings.g.intern( "i32"), TypeInterner.Index.i32);
+            ptr.pushType(Interner.Strings.g.intern( "i64"), TypeInterner.Index.i64);
+
+            ptr.pushType(Interner.Strings.g.intern(  "u8"), TypeInterner.Index.u8);
+            ptr.pushType(Interner.Strings.g.intern( "u16"), TypeInterner.Index.u16);
+            ptr.pushType(Interner.Strings.g.intern( "u32"), TypeInterner.Index.u32);
+            ptr.pushType(Interner.Strings.g.intern( "u64"), TypeInterner.Index.u64);
+
+            ptr.pushType(Interner.Strings.g.intern( "f32"), TypeInterner.Index.f32);
+            ptr.pushType(Interner.Strings.g.intern( "f64"), TypeInterner.Index.f64);
+
+            ptr.pushType(
+                Interner.Strings.g.intern("Sexp"),
+                TypeInterner.g.intern(
+                    .{
+                        .tag = .pointer,
+                        .data = .{ .pointer = TypeInterner.Index.@"opaque" },
+                    }
+                )
+            );
+
+            return ptr;
         }
 
         pub fn deinit(self: *@This()) void {
-            self.types.deinit();
+            self.types.deinit(self.allocator);
+            self.allocator.destroy(self);
         }
 
         pub fn resolveRef(self: *@This(), ref: Indexes.String) !TypeInterner.Index {
@@ -371,11 +418,18 @@ pub const LLType = struct {
             return idx;
         }
 
-        pub fn pushType(self: *@This(), name: Indexes.String, ty: TypeInterner.Index) !void {
-            self.types.put(name, ty) catch unreachable;
+        pub fn pushType(self: *@This(), name: Indexes.String, ty: TypeInterner.Index) void {
+            self.types.put(self.allocator, name, ty) catch unreachable;
+        }
+
+        pub fn pushFunction(self: *@This(), name: Indexes.String, func: JitContext.Func) void {
+            self.functions.put(self.allocator, name, func) catch unreachable;
         }
 
         pub const JitContext = struct {
+            ctx: *TypesContext,
+            ks: *keystone.ks_engine,
+
             var globalThis: ?*@This() = null;
 
             pub const CompiledFunction = struct {
@@ -396,15 +450,30 @@ pub const LLType = struct {
                 compiled: CompiledFunction,
             };
 
-            ctx: *TypesContext,
-            functions: std.AutoHashMap(Indexes.String, Func),
-            ks: *keystone.ks_engine,
-
-            const Builtins = struct {
+            pub const Builtins = struct {
                 fn print_int(i: u32) callconv(.C) void {
                     std.debug.print("print_int: {d}\n", .{i});
                 }
+
+                fn print_sexp(x: *void) callconv(.C) void {
+                    // std.debug.print("print_sexp: {*} {}\n", .{x, @intFromPtr(x)});
+                    const node: SexpIndex.Node = @enumFromInt(@intFromPtr(x));
+                    // std.debug.print("print_sexp: {any}\n", .{node});
+                    std.debug.print("print_sexp: start\n", .{});
+                    globalThis.?.ctx.sexpCtx.print(node, 0);
+                    std.debug.print("\nprint_sexp: end\n", .{});
+                }
+
+                pub fn fix_hex(p: *void) callconv(.C) *void {
+                    const b = globalThis.?.ctx.allocator.alloc(u8, 8) catch unreachable;
+                    defer globalThis.?.ctx.allocator.free(b);
+                    const x: usize = @intFromPtr(p);
+                    const f = std.fmt.bufPrint(b, "{x}", .{x}) catch unreachable;
+                    const res = std.fmt.parseInt(usize, f, 10) catch unreachable;
+                    return @ptrFromInt(res);
+                }
             };
+
 
             pub fn init(ctx: *TypesContext) *@This() {
                 std.debug.assert(globalThis == null);
@@ -439,38 +508,35 @@ pub const LLType = struct {
 
                 ptr.* = .{
                     .ctx = ctx,
-                    .functions = std.AutoHashMap(Indexes.String, Func).init(ctx.allocator),
                     .ks = ks,
                 };
                 globalThis = ptr;
 
-                {
-                    const n = Interner.Strings.g.pushString("print_int");
-                    ptr.functions.put(n, .{
-                        .builtin = .{
-                            .name = n,
-                            .ptr = @constCast(@ptrCast(&Builtins.print_int)),
-                        }
-                    }) catch unreachable;
-                    const params = ctx.allocator.dupe(Function.Param, &[_]Function.Param{
-                        .{
-                            .name = n,
-                            .typ = TypeInterner.Index.u32,
-                        }
-                    }) catch unreachable;
-                    const x: TypeInterner.Index = TypeInterner.g.intern(.{
-                        .tag = .function,
-                        .data = .{
-                            .function = .{
-                                .name = n,
-                                .return_type = TypeInterner.Index.void,
-                                .params = @constCast(params),
-                            },
-                        },
-                    });
-                    // std.debug.print("putting {s}: {any}\n", .{ "print_int", x });
-                    ctx.types.put(n, x) catch unreachable;
-                }
+                // {
+                //     const n = Interner.Strings.g.intern("print_int");
+                //     ptr.functions.put(n, .{
+                //         .builtin = .{
+                //             .name = n,
+                //             .ptr = @constCast(@ptrCast(&Builtins.print_int)),
+                //         }
+                //     }) catch unreachable;
+                //     const params = ctx.allocator.dupe(Function.Param, &[_]Function.Param{
+                //         .{
+                //             .name = n,
+                //             .typ = TypeInterner.Index.u32,
+                //         }
+                //     }) catch unreachable;
+                //     ctx.pushType(n, TypeInterner.g.intern(.{
+                //         .tag = .function,
+                //         .data = .{
+                //             .function = .{
+                //                 .name = n,
+                //                 .return_type = TypeInterner.Index.void,
+                //                 .params = @constCast(params),
+                //             },
+                //         },
+                //     }));
+                // }
                 std.debug.assert(globalThis != null);
 
                 return ptr;
@@ -480,12 +546,11 @@ pub const LLType = struct {
                 std.debug.assert(globalThis != null);
                 std.debug.assert(self == globalThis);
                 globalThis = null;
-                self.functions.deinit();
                 // self.ctx.allocator.destroy(globalThis.?);
             }
 
             fn resolveSymbol(self: *@This(), symbol: Indexes.String, value: [*c]u64) bool {
-                if (self.functions.get(symbol)) |f| {
+                if (self.ctx.functions.get(symbol)) |f| {
                     switch (f) {
                         .builtin => |builtin| {
                             value.* = @intFromPtr(builtin.ptr);
@@ -504,7 +569,7 @@ pub const LLType = struct {
             fn symResolver(symbol: [*c]u8, value: [*c]u64) callconv(.C) bool {
                 const s = symbol[0..std.mem.len(symbol)];
                 std.debug.assert(globalThis != null);
-                const n = Interner.Strings.g.pushString(s);
+                const n = Interner.Strings.g.intern(s);
                 return globalThis.?.resolveSymbol(n, value);
             }
 
@@ -571,7 +636,7 @@ pub const LLType = struct {
                             return scope.get(name);
                         }
                     }
-                    if (self.jitCtx.functions.get(name)) |_| {
+                    if (self.jitCtx.ctx.functions.get(name)) |_| {
                         self.globals_to_process.put(self.allocator, name, .{
                             .name = .{ .external_global = name },
                             .typ = self.jitCtx.ctx.types.get(name) orelse unreachable,
@@ -591,6 +656,9 @@ pub const LLType = struct {
                 fn t2s(self: *@This(), typ: TypeInterner.Index) []const u8 {
                     _ = self;
                     return switch (typ) {
+                        .any => {
+                            dump_and_fail(.{error.AnyTypeIsNotSupported});
+                        },
                         .i32, .u32 => "w",
                         .i64, .u64 => "l",
                         .f32, .f64, .bool, .i8, .u8, .i16, .u16 => {
@@ -601,7 +669,10 @@ pub const LLType = struct {
                         .number_literal, .negative_number_literal, .float_number_literal, .negative_float_number_literal => {
                             dump_and_fail(.{error.NumberLiteralIsNotSupported});
                         },
-                        else => switch (typ.in(TypeInterner.g.types.items(.tag))) {
+                        .@"opaque" => {
+                            dump_and_fail(.{error.OpaqueTypeIsNotSupported});
+                        },
+                        _ => switch (typ.in(TypeInterner.g.types.items(.tag))) {
                             .pointer => "l",
                             .function => "l",
                             else => {
@@ -726,6 +797,10 @@ pub const LLType = struct {
                                 },
                             }
                         },
+                        .quote => |quoted| {
+                            std.debug.print("quote: {any}\n", .{quoted});
+                            return .{ .integer = @intFromEnum(quoted) };
+                        },
                         else => {
                             unreachable;
                         }
@@ -770,14 +845,18 @@ pub const LLType = struct {
                         const out_size = try std.posix.lseek_CUR_get(self.qbeState.fdin);
                         const out_mem = try std.posix.mmap(null, out_size, std.posix.PROT.READ | std.posix.PROT.WRITE, std.posix.MAP{ .TYPE = .SHARED }, self.qbeState.fdin, 0);
                         defer std.posix.munmap(out_mem);
-                        // std.debug.print("{s}\n", .{out_mem});
+                        if (std.mem.eql(u8, defun.name.asString(), "main")) {
+                            std.debug.print("{s}\n", .{out_mem});
+                        }
                         // dump_and_fail(out_mem);
                     }
 
                     // unreachable;
 
                     const instructions = try self.qbeCompile(defun.name);
-                    // std.debug.print("{s}\n", .{instructions.mmap});
+                    if (std.mem.eql(u8, defun.name.asString(), "main")) {
+                        std.debug.print("{s}\n", .{instructions.mmap});
+                    }
                     defer instructions.deinit();
                     const fn_mem = try self.jitCode(instructions.code);
                     return .{
@@ -924,7 +1003,7 @@ pub const LLType = struct {
                     },
                 );
                 self.pushIntoScope(name, fn_type);
-                try self.ctx.pushType(name, fn_type);
+                self.ctx.pushType(name, fn_type);
 
                 return .{
                     .ast = .{
@@ -1098,6 +1177,78 @@ pub const LLType = struct {
                             .typ = ret,
                         };
                     },
+                    .defun_builtin => |defun| {
+                        const Case = enum {
+                            print_int,
+                            print_sexp,
+                            fix_hex,
+                        };
+                        const builtinF = std.meta.stringToEnum(Case, defun.name.asString()) orelse {
+                            return error.UnknownBuiltin;
+                        };
+
+                        const return_type = try self.ctx.parseTypeReference(defun.ret_type);
+
+                        var params = std.ArrayList(LLType.Function.Param).init(self.ctx.allocator);
+                        errdefer params.deinit();
+                        var args = std.ArrayList(TypedAst.Ast.Defun.Arg).init(self.ctx.allocator);
+                        errdefer args.deinit();
+
+                        for (defun.args) |arg| {
+                            const arg_type = try self.ctx.parseTypeReference(arg.typ);
+                            params.append(.{
+                                .name = arg.name,
+                                .typ = arg_type,
+                            }) catch unreachable;
+                            args.append(.{
+                                .name = arg.name,
+                                .typ = arg_type,
+                            }) catch unreachable;
+                        }
+
+                        const fn_type = TypeInterner.g.intern(
+                            .{
+                                .tag = .function,
+                                .data = .{
+                                    .function = .{
+                                        .name = defun.name,
+                                        .return_type = return_type,
+                                        .params = try params.toOwnedSlice(),
+                                    },
+                                },
+                            },
+                        );
+
+                        self.ctx.pushType(defun.name, fn_type);
+                        self.ctx.pushFunction(defun.name, .{
+                            .builtin = .{
+                                .name = defun.name,
+                                .ptr = switch (builtinF) {
+                                    .print_int => @constCast(@ptrCast(&JitContext.Builtins.print_int)),
+                                    .print_sexp => @constCast(@ptrCast(&JitContext.Builtins.print_sexp)),
+                                    .fix_hex => @constCast(@ptrCast(&JitContext.Builtins.fix_hex)),
+                                },
+                            },
+                        });
+
+                        return .{
+                            .ast = .{
+                                .defun_builtin = .{
+                                    .name = defun.name,
+                                    .ret_type = return_type,
+                                    .args = try args.toOwnedSlice(),
+                                    .body = &[_]TypedAst{},
+                                },
+                            },
+                            .typ = fn_type,
+                        };
+                    },
+                    .quote => |quote| {
+                        return .{
+                            .ast = .{ .quote = quote },
+                            .typ = self.ctx.types.get(Interner.Strings.g.intern("Sexp")) orelse unreachable,
+                        };
+                    },
                     else => {
                         dump_and_fail(root);
                         unreachable;
@@ -1153,6 +1304,7 @@ pub fn LLAst(comptime ExprT: fn(type) type, comptime TypT: type) type {
         };
 
         defun: Defun,
+        defun_builtin: Defun,
         symbol: struct {
             name: Indexes.String,
         },
@@ -1174,10 +1326,18 @@ pub fn LLAst(comptime ExprT: fn(type) type, comptime TypT: type) type {
             value: ?*ExprT(Self),
         },
         returnStmt: ?*ExprT(Self),
+        quote: SexpIndex.Node,
 
         pub fn free(self: *const @This(), allocator: Allocator) void {
             switch (self.*) {
                 .defun => |defun| {
+                    allocator.free(defun.args);
+                    for (defun.body) |body| {
+                        body.free(allocator);
+                    }
+                    allocator.free(defun.body);
+                },
+                .defun_builtin => |defun| {
                     allocator.free(defun.args);
                     for (defun.body) |body| {
                         body.free(allocator);
@@ -1222,7 +1382,7 @@ pub fn LLAst(comptime ExprT: fn(type) type, comptime TypT: type) type {
             std.debug.assert(indent < indent_raw.len);
             const indent_str = indent_raw[0..indent];
             switch (self) {
-                .defun => |defun| {
+                .defun, .defun_builtin => |defun| {
                     std.debug.print("{s}defun {s}:\n{s}  args:\n", .{ indent_str, defun.name.asString(), indent_str });
                     for (defun.args) |arg| {
                         std.debug.print("{s}    {s}:\n", .{ indent_str, arg.name.asString() });
@@ -1285,6 +1445,11 @@ pub fn LLAst(comptime ExprT: fn(type) type, comptime TypT: type) type {
                 .sexp => |sexp_idx| {
                     ctx.print(sexp_idx, indent);
                 },
+                .quote => {
+                    std.debug.print("{s}(quote ", .{ indent_str });
+                    ctx.print(self.quote, 0);
+                    std.debug.print(")\n", .{});
+                },
             }
         }
 
@@ -1339,9 +1504,11 @@ pub const LLParser = struct {
                 };
                 const Case = enum {
                     defun,
+                    @"defun-builtin",
                     begin,
                     defvar,
                     @"return",
+                    quote,
                 };
 
                 const cs: Case = std.meta.stringToEnum(Case, fst.asString()) orelse {
@@ -1353,9 +1520,20 @@ pub const LLParser = struct {
                 };
 
                 switch (cs) {
-                    .defun => {
+                    inline .defun, .@"defun-builtin" => |tag| {
                         const defunArgs = items[1..];
-                        std.debug.assert(defunArgs.len >= 3);
+                        switch (tag) {
+                            .@"defun-builtin" => {
+                                std.debug.assert(defunArgs.len == 3);
+                            },
+                            .defun => {
+                                std.debug.assert(defunArgs.len >= 3);
+                            },
+                            else => {
+                                @compileError("bad tag");
+                            }
+                        }
+
                         const retType = defunArgs[0];
                         const name = blk: {
                             const nameIdx = defunArgs[1];
@@ -1381,14 +1559,34 @@ pub const LLParser = struct {
                             break :blk try argsList.toOwnedSlice();
                         };
                         const body = blk: {
-                            const bodyItems = defunArgs[3..];
-                            var bodyList = std.ArrayList(UnresolvedLLAst).initCapacity(self.allocator, bodyItems.len) catch unreachable;
-                            for (bodyItems) |item| {
-                                bodyList.appendAssumeCapacity(try self.parse(item));
+                            switch (tag) {
+                                .@"defun-builtin" => {
+                                    break :blk &[0]UnresolvedLLAst{};
+                                },
+                                .defun => {
+                                    const bodyItems = defunArgs[3..];
+                                    var bodyList = std.ArrayList(UnresolvedLLAst).initCapacity(self.allocator, bodyItems.len) catch unreachable;
+                                    for (bodyItems) |item| {
+                                        bodyList.appendAssumeCapacity(try self.parse(item));
+                                    }
+                                    break :blk try bodyList.toOwnedSlice();
+                                },
+                                else => {
+                                    @compileError("bad tag");
+                                }
                             }
-                            break :blk try bodyList.toOwnedSlice();
                         };
-                        return .{ .defun = .{ .name = name, .ret_type = retType, .args = args, .body = body } };
+                        switch (tag) {
+                            .@"defun-builtin" => {
+                                return .{ .defun_builtin = .{ .name = name, .ret_type = retType, .args = args, .body = body } };
+                            },
+                            .defun => {
+                                return .{ .defun = .{ .name = name, .ret_type = retType, .args = args, .body = body } };
+                            },
+                            else => {
+                                @compileError("bad tag");
+                            }
+                        }
                     },
                     .begin => {
                         std.debug.assert(items.len > 1);
@@ -1429,6 +1627,19 @@ pub const LLParser = struct {
                             break :blk ptr;
                         };
                         return .{ .returnStmt = value };
+                    },
+                    .quote => {
+                        // Keystone is a piece of garbage and for some reason converts $11 to $0x11 during parsing.
+                        // This means that creating pointers from integers in QBE is impossible. Calling fix_hex is a
+                        // dumb fix to revert hex pointer back to decimal.
+                        var argsList = std.ArrayList(UnresolvedLLAst).initCapacity(self.allocator, 1) catch unreachable;
+                        argsList.appendAssumeCapacity(.{ .quote = items[1] });
+                        return .{
+                            .call = .{
+                                .name = Interner.Strings.g.intern("fix_hex"),
+                                .args = try argsList.toOwnedSlice(),
+                            }
+                        };
                     },
                 }
             },
