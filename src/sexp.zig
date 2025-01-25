@@ -47,7 +47,7 @@ pub const Interner = struct {
     };
 
     pub const Strings = struct {
-        pub var global: *@This() = undefined;
+        pub var g: *@This() = undefined;
 
         const StringsRaw = std.ArrayListUnmanaged(u8);
         const LenSize = u32;
@@ -69,7 +69,7 @@ pub const Interner = struct {
             }
 
             pub inline fn asString(self: Index) []const u8 {
-                return self.asStr(global.strings_raw);
+                return self.asStr(g.strings_raw);
             }
         };
 
@@ -110,7 +110,7 @@ pub const Interner = struct {
             return .{
                 .strings_raw = strings_raw,
                 .allocator = allocator,
-                .string_lookup = .{},
+                .string_lookup = IndexedHashMap(Index).empty,
             };
         }
 
@@ -194,8 +194,6 @@ pub const Sexp = struct {
 
         allocator: Allocator,
         impl: struct {
-            strings_interner: *Interner.Strings,
-
             lists_raw: std.ArrayList(Index.Node),
             lists: std.ArrayList(Slice),
 
@@ -203,14 +201,13 @@ pub const Sexp = struct {
             free_nodes: std.ArrayList(Index.Node),
         },
 
-        pub fn init(allocator: Allocator, strings_interner: *Interner.Strings) @This() {
+        pub fn init(allocator: Allocator) @This() {
             return .{
                 .allocator = allocator,
                 .impl = .{
                     .free_nodes = std.ArrayList(Index.Node).init(allocator),
                     .lists_raw = std.ArrayList(Index.Node).init(allocator),
                     .lists = std.ArrayList(Slice).init(allocator),
-                    .strings_interner = strings_interner,
                     .nodes = .{},
                 },
             };
@@ -253,10 +250,6 @@ pub const Sexp = struct {
 
         pub inline fn getNode(self: *@This(), idx: Index.Node) Sexp {
             return self.impl.nodes.get(@intFromEnum(idx));
-        }
-
-        pub inline fn getString(self: *@This(), idx: Interner.Strings.Index) []const u8 {
-            return self.impl.strings_interner.getString(idx);
         }
 
         pub inline fn getList(self: *@This(), idx: Index.List) []Index.Node {
@@ -340,10 +333,6 @@ pub const Sexp = struct {
             return @enumFromInt(listidx);
         }
 
-        pub fn push_string(self: *@This(), str: []u8) Interner.Strings.Index {
-            return self.impl.strings_interner.pushString(str);
-        }
-
         pub fn push_node(self: *@This(), node: Sexp) Index.Node {
             if (self.impl.free_nodes.items.len > 0) {
                 return self.impl.free_nodes.pop();
@@ -411,11 +400,11 @@ pub const Sexp = struct {
                             return self.ctx.push_node(Sexp { .tag = .bool_value, .data = .{ .bool_value = token.bool_value } });
                         },
                         .symbol => {
-                            const x = self.ctx.push_string(self.lexer.string.?);
+                            const x = Interner.Strings.g.pushString(self.lexer.string.?);
                             return self.ctx.push_node(Sexp { .tag = .symbol, .data = .{ .symbol = x } });
                         },
                         .str => {
-                            return self.ctx.push_node(Sexp { .tag = .string, .data = .{ .string = self.ctx.push_string(self.lexer.string.?) } });
+                            return self.ctx.push_node(Sexp { .tag = .string, .data = .{ .string = Interner.Strings.g.pushString(self.lexer.string.?) } });
                         },
                         .r_paren => {
                             return error.UnexpectedRParen;

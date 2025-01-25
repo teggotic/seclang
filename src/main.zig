@@ -41,9 +41,14 @@ pub fn main() !void {
     var strings_interner = sexp.Interner.Strings.init(allocator);
     defer strings_interner.deinit();
 
-    sexp.Interner.Strings.global = &strings_interner;
+    sexp.Interner.Strings.g = &strings_interner;
 
-    var ctx = sexp.Sexp.ParsingContext.init(allocator, &strings_interner);
+    var lltypesInterner = llexp.LLType.TypeInterner.init(allocator);
+    defer lltypesInterner.deinit();
+
+    llexp.LLType.TypeInterner.g = lltypesInterner;
+
+    var ctx = sexp.Sexp.ParsingContext.init(allocator);
     defer ctx.deinit();
 
     var sexpIter = ctx.createTopsIter(source);
@@ -102,7 +107,8 @@ pub fn main() !void {
 
     std.debug.print("c = {}\n", .{c});
 
-    std.debug.print("ctx.impl.strings_interner.strings.len = {}\n", .{ctx.impl.strings_interner.strings_raw.items.len});
+    std.debug.print("strings_interner.strings_raw.len = {}\n", .{strings_interner.strings_raw.items.len});
+    std.debug.print("lltypesInterner.types.len = {}\n", .{lltypesInterner.types.len});
     std.debug.print("ctx.impl.lists.len = {}\n", .{ctx.impl.lists.items.len});
     std.debug.print("ctx.impl.nodes.len = {}\n", .{ctx.impl.nodes.len});
     std.debug.print("ctx.impl.nodes.len - free_nodes = {}\n", .{ctx.impl.nodes.len - ctx.impl.free_nodes.items.len});
